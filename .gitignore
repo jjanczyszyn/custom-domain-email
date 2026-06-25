@@ -1,0 +1,20 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.tfvars
+!*.tfvars.example
+.build/
+
+# Personal config (kept out of the repo)
+.env
+config/domains.yaml
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

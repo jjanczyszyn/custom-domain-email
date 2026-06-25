@@ -1,0 +1,7 @@
+{
+  "name": "email-canary",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Scheduled heartbeat that sends a probe email through the inbound pipeline."
+}

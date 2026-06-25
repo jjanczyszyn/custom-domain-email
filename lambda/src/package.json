@@ -1,0 +1,7 @@
+{
+  "name": "email-forwarder",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "SES inbound -> Gmail forwarder. AWS SDK v3 is provided by the nodejs20.x runtime, so there are no dependencies to bundle."
+}

@@ -1,0 +1,16 @@
+# Copy this to config/domains.yaml and put in your own domains.
+# config/domains.yaml is gitignored so your addresses never get committed.
+#
+# Per domain:
+#   forward_to        catch-all: every address @domain goes here (one or more)
+#   aliases           optional per-mailbox overrides, e.g. hello: [you@gmail.com]
+#   custom_mail_from  optional (default false). Leave off if the domain already
+#                     sends via SES/Resend, to avoid touching its MAIL FROM.
+domains:
+  example.com:
+    forward_to: [you@gmail.com]
+    aliases:
+      hello: [you@gmail.com]
+
+  example.org:
+    forward_to: [you@gmail.com]

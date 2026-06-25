@@ -1,0 +1,10 @@
+{
+  "name": "email-forwarder-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Test harness for the forwarder. Runtime code lives in src/ (what gets deployed).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
