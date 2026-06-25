@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="r53" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#A06BFF"/><stop offset="1" stop-color="#5B2EC9"/>
+    </linearGradient>
+    <linearGradient id="ses" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F0479B"/><stop offset="1" stop-color="#B3105F"/>
+    </linearGradient>
+    <linearGradient id="lam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF8A1E"/><stop offset="1" stop-color="#C25A00"/>
+    </linearGradient>
+    <linearGradient id="s3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#94C13D"/><stop offset="1" stop-color="#4F6E0E"/>
+    </linearGradient>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#1a2230" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#FF9900"/>
+    </marker>
+    <marker id="arrg" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8895A7"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="980" fill="#FBFBFD"/>
+
+  <!-- Title -->
+  <text x="800" y="78" text-anchor="middle" font-size="46" font-weight="700" fill="#232F3E">How the email setup works</text>
+  <text x="800" y="120" text-anchor="middle" font-size="22" fill="#5b6675">Inbound mail flows left to right. Replies go back out through Amazon SES.</text>
+
+  <!-- AWS account boundary -->
+  <rect x="360" y="250" width="850" height="500" rx="22" fill="#FF9900" fill-opacity="0.05" stroke="#FF9900" stroke-width="2.5" stroke-dasharray="9 7"/>
+  <g transform="translate(388,278)">
+    <text x="46" y="6" font-size="20" font-weight="700" fill="#232F3E">Your AWS account</text>
+    <path d="M0,18 C 11,26 27,26 38,16" stroke="#FF9900" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+    <path d="M31,12 L40,15 L34,22 z" fill="#FF9900"/>
+  </g>
+
+  <!-- Flow arrows (orange) -->
+  <line x1="228" y1="380" x2="392" y2="380" stroke="#FF9900" stroke-width="4" marker-end="url(#arr)"/>
+  <line x1="548" y1="380" x2="722" y2="380" stroke="#FF9900" stroke-width="4" marker-end="url(#arr)"/>
+  <line x1="878" y1="380" x2="1052" y2="380" stroke="#FF9900" stroke-width="4" marker-end="url(#arr)"/>
+  <line x1="1208" y1="380" x2="1372" y2="380" stroke="#FF9900" stroke-width="4" marker-end="url(#arr)"/>
+  <line x1="1130" y1="458" x2="1130" y2="582" stroke="#FF9900" stroke-width="4" marker-start="url(#arr)" marker-end="url(#arr)"/>
+
+  <!-- N1 sender -->
+  <g filter="url(#sh)"><rect x="78" y="305" width="150" height="150" rx="24" fill="#ECEFF3"/></g>
+  <g stroke="#5A6B7B" stroke-width="5" fill="none">
+    <rect x="121" y="358" width="64" height="44" rx="6"/>
+    <polyline points="121,358 153,384 185,358"/>
+  </g>
+  <text x="153" y="486" text-anchor="middle" font-size="19" font-weight="700" fill="#232F3E">Someone emails</text>
+  <text x="153" y="509" text-anchor="middle" font-size="16" fill="#5b6675">hello@yourdomain</text>
+
+  <!-- N2 Route 53 -->
+  <g filter="url(#sh)"><rect x="395" y="305" width="150" height="150" rx="24" fill="url(#r53)"/></g>
+  <g stroke="#ffffff" stroke-width="5" fill="none">
+    <circle cx="470" cy="380" r="32"/>
+    <ellipse cx="470" cy="380" rx="13" ry="32"/>
+    <line x1="438" y1="380" x2="502" y2="380"/>
+    <line x1="444" y1="362" x2="496" y2="362"/>
+    <line x1="444" y1="398" x2="496" y2="398"/>
+  </g>
+  <text x="470" y="486" text-anchor="middle" font-size="19" font-weight="700" fill="#232F3E">Amazon Route 53</text>
+  <text x="470" y="509" text-anchor="middle" font-size="16" fill="#5b6675">DNS, the MX record</text>
+
+  <!-- N3 SES -->
+  <g filter="url(#sh)"><rect x="725" y="305" width="150" height="150" rx="24" fill="url(#ses)"/></g>
+  <g stroke="#ffffff" stroke-width="5" fill="none">
+    <rect x="768" y="358" width="64" height="44" rx="6"/>
+    <polyline points="768,358 800,384 832,358"/>
+  </g>
+  <text x="800" y="486" text-anchor="middle" font-size="19" font-weight="700" fill="#232F3E">Amazon SES</text>
+  <text x="800" y="509" text-anchor="middle" font-size="16" fill="#5b6675">receives the mail</text>
+
+  <!-- N4 Lambda -->
+  <g filter="url(#sh)"><rect x="1055" y="305" width="150" height="150" rx="24" fill="url(#lam)"/></g>
+  <g stroke="#ffffff" stroke-width="7" fill="none" stroke-linecap="round">
+    <line x1="1152" y1="352" x2="1110" y2="410"/>
+    <line x1="1128" y1="378" x2="1152" y2="410"/>
+  </g>
+  <text x="1130" y="486" text-anchor="middle" font-size="19" font-weight="700" fill="#232F3E">AWS Lambda</text>
+  <text x="1130" y="509" text-anchor="middle" font-size="16" fill="#5b6675">rewrites, forwards</text>
+
+  <!-- S3 under Lambda -->
+  <g filter="url(#sh)"><rect x="1075" y="585" width="110" height="110" rx="20" fill="url(#s3)"/></g>
+  <g stroke="#ffffff" stroke-width="4" fill="none">
+    <ellipse cx="1130" cy="618" rx="26" ry="7"/>
+    <path d="M1104,618 L1111,664 L1149,664 L1156,618"/>
+    <path d="M1111,664 q19,10 38,0"/>
+  </g>
+  <text x="1130" y="722" text-anchor="middle" font-size="18" font-weight="700" fill="#232F3E">Amazon S3</text>
+  <text x="1130" y="744" text-anchor="middle" font-size="15" fill="#5b6675">stores raw email</text>
+
+  <!-- N5 Gmail -->
+  <g filter="url(#sh)"><rect x="1375" y="305" width="150" height="150" rx="24" fill="#ffffff" stroke="#E2E5EA" stroke-width="1.5"/></g>
+  <g transform="translate(1402,344) scale(0.375)">
+    <path fill="#4285F4" d="M58.182 192.05V93.14L27.507 65.077 0 49.504v125.091c0 9.658 7.825 17.455 17.455 17.455z"/>
+    <path fill="#34A853" d="M197.818 192.05h40.727c9.659 0 17.455-7.826 17.455-17.455V49.505l-31.156 17.837-27.026 25.798z"/>
+    <path fill="#EA4335" d="M58.182 93.14l-4.174-38.647 4.174-36.989L128 69.868l69.818-52.364 4.669 34.992-4.669 40.644L128 145.504z"/>
+    <path fill="#FBBC04" d="M197.818 17.504V93.14L256 49.504V26.231c0-21.585-24.64-33.89-41.89-20.945z"/>
+    <path fill="#C5221F" d="M0 49.504l26.759 20.07L58.182 93.14V17.504L41.89 5.286C24.61-7.66 0 4.646 0 26.231z"/>
+  </g>
+  <text x="1450" y="486" text-anchor="middle" font-size="19" font-weight="700" fill="#232F3E">Your Gmail</text>
+  <text x="1450" y="509" text-anchor="middle" font-size="16" fill="#5b6675">inbox</text>
+
+  <!-- Reply lane -->
+  <line x1="1450" y1="845" x2="828" y2="845" stroke="#8895A7" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#arrg)"/>
+  <line x1="772" y1="845" x2="240" y2="845" stroke="#8895A7" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#arrg)"/>
+  <text x="1450" y="884" text-anchor="middle" font-size="15" fill="#5b6675">Gmail, Send mail as</text>
+  <text x="800" y="884" text-anchor="middle" font-size="15" fill="#5b6675">Amazon SES, SMTP</text>
+  <text x="240" y="884" text-anchor="middle" font-size="15" fill="#5b6675">to anyone</text>
+  <text x="800" y="820" text-anchor="middle" font-size="18" font-weight="700" fill="#232F3E">Replies go out as hello@yourdomain</text>
+
+  <!-- Footer -->
+  <text x="800" y="945" text-anchor="middle" font-size="20" fill="#9aa3b0">Runs on your own AWS account for about $1 a month</text>
+</svg>

@@ -8,6 +8,8 @@ Inbound mail to `*@yourdomain` is received by SES, stored in S3, and a Lambda
 re-sends it to your Gmail (the original sender is kept in `Reply-To`). Outbound
 uses SES SMTP wired into Gmail's "Send mail as".
 
+![How the email setup works](docs/email-setup-diagram.png)
+
 ## What it costs
 
 Around **$1/month** at personal volume, almost all of which is the optional
