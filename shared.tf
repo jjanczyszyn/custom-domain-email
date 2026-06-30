@@ -63,10 +63,21 @@ resource "aws_iam_role_policy" "forwarder" {
     Statement = [
       { Sid = "Logs", Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:*" },
       { Sid = "ReadInbox", Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.inbound.arn}/*" },
+      { Sid = "ArchiveOversize", Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.inbound.arn}/archive/*" },
       { Sid = "SendForwarded", Effect = "Allow", Action = ["ses:SendRawEmail"], Resource = "*" },
       { Sid = "Heartbeat", Effect = "Allow", Action = ["cloudwatch:PutMetricData"], Resource = "*" },
+      { Sid = "DeadLetter", Effect = "Allow", Action = ["sqs:SendMessage"], Resource = aws_sqs_queue.forwarder_dlq.arn },
     ]
   })
+}
+
+# Catches any forward that still fails after retries (SES outage, malformed
+# mail, a future bug). The failed invocation record lands here for inspection
+# or replay, so an inbound email is never lost without a trace. The raw email
+# itself also remains in S3 until the lifecycle rule expires it.
+resource "aws_sqs_queue" "forwarder_dlq" {
+  name                      = "${var.project}-forwarder-dlq"
+  message_retention_seconds = 1209600 # 14 days (max)
 }
 
 # Explicit log group with retention (otherwise logs are kept forever).
@@ -82,8 +93,8 @@ resource "aws_lambda_function" "forwarder" {
   handler          = "index.handler"
   filename         = data.archive_file.forwarder.output_path
   source_code_hash = data.archive_file.forwarder.output_base64sha256
-  timeout          = 30
-  memory_size      = 256
+  timeout          = 60
+  memory_size      = 1024 # headroom to decode/recompress large image attachments
 
   environment {
     variables = {
@@ -97,6 +108,19 @@ resource "aws_lambda_function" "forwarder" {
   }
 
   depends_on = [aws_cloudwatch_log_group.forwarder]
+}
+
+# SES invokes the forwarder asynchronously, so route invocations that exhaust
+# their retries to the dead-letter queue instead of letting them disappear.
+resource "aws_lambda_function_event_invoke_config" "forwarder" {
+  function_name          = aws_lambda_function.forwarder.function_name
+  maximum_retry_attempts = 2
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.forwarder_dlq.arn
+    }
+  }
 }
 
 resource "aws_lambda_permission" "allow_ses" {

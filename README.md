@@ -13,9 +13,9 @@ uses SES SMTP wired into Gmail's "Send mail as".
 ## What it costs
 
 Around **$1/month** at personal volume, almost all of which is the optional
-monitoring (3 CloudWatch alarms + 1 custom metric). Mail receiving, sending,
-Lambda, and S3 sit inside free tiers. Route53 hosted zones are billed separately
-at $0.50/zone whether or not you run this.
+monitoring (4 CloudWatch alarms + 1 custom metric). Mail receiving, sending,
+Lambda, S3, and the dead-letter SQS queue sit inside free tiers. Route53 hosted
+zones are billed separately at $0.50/zone whether or not you run this.
 
 ## Requirements
 
@@ -108,11 +108,35 @@ until it passes. The handler stays a thin I/O shell over the tested functions.
 You get an email (SNS to `alert_email`) if anything breaks:
 
 - **forwarder-errors** / **forwarder-throttles** if the Lambda fails.
+- **forwarder-dlq** if a forward fails every retry. SES invokes the forwarder
+  asynchronously, so any invocation that still throws after its retries is routed
+  to an SQS dead-letter queue (`*-forwarder-dlq`) instead of vanishing. The
+  message is held there 14 days for inspection or replay, and the raw email is
+  still in S3 — so a delivery failure is always caught, never silent.
 - **heartbeat-missing** if the end-to-end pipeline goes silent. A canary emails
   `probe@<first-domain>` hourly through the real path; the forwarder records a
   `CanaryHeartbeat` metric on arrival. If none lands inside the window, the alarm
   fires, which catches silent failures a plain error alarm cannot (MX changed,
   receipt rule disabled).
+
+### Oversize mail
+
+SES *receives* up to 40 MB but `SendRawEmail` only *sends* up to 10 MB, so a
+message in that gap can't be forwarded whole. Instead of failing (and dropping
+it), the forwarder:
+
+1. **Recompresses images to fit.** Most oversize mail is photos. It re-encodes
+   the images (largest first, highest quality that still fits) until the message
+   is under 10 MB and forwards it as a normal email — inline photos intact, just
+   at lower resolution. This handles the common case transparently.
+2. **Falls back to an archive notice** when images alone can't get under the
+   limit (e.g. a large video). The original is copied to the `archive/` prefix
+   (which the lifecycle rule never expires) and you get a small notice with the
+   sender, subject, size, and the `aws s3 cp` command to pull the full original.
+
+Either way a large email is never silently dropped. (An earlier design served the
+fallback as a one-click Lambda Function URL link, but this AWS account blocks
+public function URLs, so the private S3 archive is the durable path instead.)
 
 Confirm the SNS subscription email AWS sends after the first apply, or alarms
 cannot reach you.

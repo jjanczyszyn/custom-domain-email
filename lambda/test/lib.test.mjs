@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolve, rewrite, isProbe } from "../src/lib.mjs";
+import {
+  resolve,
+  rewrite,
+  isProbe,
+  isOversize,
+  parseHeaders,
+  oversizeNotice,
+  SES_MAX_RAW_BYTES,
+} from "../src/lib.mjs";
 
 const MAPPING = {
   "@example.com": ["owner@gmail.com"],
@@ -84,4 +92,61 @@ test("rewrite: existing Reply-To is not overwritten", () => {
   const out = rewrite(raw, "no-reply@example.com");
   assert.match(out, /^Reply-To: real@sender\.com$/m);
   assert.doesNotMatch(out, /Reply-To:.*jane/);
+});
+
+test("isOversize: true past the SES limit (minus margin), false below", () => {
+  assert.equal(isOversize(SES_MAX_RAW_BYTES + 1), true);
+  assert.equal(isOversize(SES_MAX_RAW_BYTES - 256 * 1024 + 1), true); // inside margin
+  assert.equal(isOversize(5 * 1024 * 1024), false);
+  assert.equal(isOversize(0), false);
+});
+
+test("parseHeaders: extracts named headers and unfolds continuations", () => {
+  const raw = [
+    'From: "Jane Doe" <jane@sender.com>',
+    "Subject: a very",
+    " long subject",
+    "To: hello@example.com",
+    "",
+    "body From: not-a-header@x.com",
+  ].join("\r\n");
+  const h = parseHeaders(raw, ["from", "subject"]);
+  assert.equal(h.from, '"Jane Doe" <jane@sender.com>');
+  assert.equal(h.subject, "a very long subject"); // folded line joined
+});
+
+test("oversizeNotice: threads correctly and points at the S3 original", () => {
+  const headerRaw = [
+    'From: "Jane Doe" <jane@sender.com>',
+    "Subject: Big photos",
+    "Date: Mon, 29 Jun 2026 12:40:57 +0200",
+    "",
+  ].join("\r\n");
+  const out = oversizeNotice({
+    headerRaw,
+    fromAddress: "no-reply@example.com",
+    destinations: ["owner@gmail.com"],
+    bucket: "my-bucket",
+    key: "archive/abc123",
+    sizeBytes: 12118707,
+  });
+  assert.match(out, /^From: "Jane Doe via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^Reply-To: "Jane Doe" <jane@sender\.com>/m);
+  assert.match(out, /^Subject: \[Large email — not auto-forwarded\] Big photos/m);
+  assert.match(out, /11\.6 MB/); // 12118707 bytes
+  assert.match(out, /archived permanently/);
+  assert.match(out, /aws s3 cp s3:\/\/my-bucket\/archive\/abc123/);
+});
+
+test("oversizeNotice: bare From (no display name) still threads", () => {
+  const out = oversizeNotice({
+    headerRaw: "From: jane@sender.com\r\nSubject: x\r\n\r\n",
+    fromAddress: "no-reply@example.com",
+    destinations: ["owner@gmail.com"],
+    bucket: "b",
+    key: "k",
+    sizeBytes: 11 * 1024 * 1024,
+  });
+  assert.match(out, /^From: "jane@sender\.com via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^Reply-To: jane@sender\.com$/m);
 });

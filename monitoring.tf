@@ -42,6 +42,26 @@ resource "aws_cloudwatch_metric_alarm" "forwarder_throttles" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
 }
 
+# ── Dead-letter alarm: a forward failed every retry and was captured ─────────
+# Pairs with the on-failure SQS queue. Any message here is an email that could
+# not be forwarded; the alarm tells you to inspect/replay it (the raw is still
+# in S3). Fires on the count of messages ever sent to the queue, so it trips
+# even if the message is later consumed.
+resource "aws_cloudwatch_metric_alarm" "forwarder_dlq" {
+  alarm_name          = "${var.project}-forwarder-dlq"
+  alarm_description   = "A forwarded email failed all retries and landed in the dead-letter queue."
+  namespace           = "AWS/SQS"
+  metric_name         = "NumberOfMessagesSent"
+  dimensions          = { QueueName = aws_sqs_queue.forwarder_dlq.name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+}
+
 # ── Heartbeat: alarm if the end-to-end pipeline goes silent ──────────────────
 # The canary sends a probe every canary_rate; the forwarder records
 # CanaryHeartbeat when it arrives. Missing data = the pipeline broke

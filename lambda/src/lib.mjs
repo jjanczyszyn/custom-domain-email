@@ -20,6 +20,77 @@ export function resolve(recipients, mapping) {
   return { destinations: [...destinations], fromDomain };
 }
 
+// SES SendRawEmail rejects anything over 10 MiB, but SES *inbound* accepts up
+// to 40 MiB, so a 10-40 MiB message arrives fine and then fails to forward.
+// We treat anything within SAFETY_MARGIN of the hard limit as oversize and
+// deliver a notice instead of throwing (which would drop the mail).
+export const SES_MAX_RAW_BYTES = 10 * 1024 * 1024;
+const SAFETY_MARGIN = 256 * 1024; // headroom for any headers SES adds on send.
+// The size a forwarded message must come in under, both to decide oversize and
+// as the target the recompressor aims for.
+export const FORWARD_TARGET_BYTES = SES_MAX_RAW_BYTES - SAFETY_MARGIN;
+
+export function isOversize(byteLength) {
+  return byteLength > FORWARD_TARGET_BYTES;
+}
+
+// Pull a few top-level headers out of a raw message without a MIME parser.
+// Returns lowercased-key map; handles folded (continuation) header lines.
+export function parseHeaders(raw, names) {
+  const headerBlock = raw.split(/\r?\n\r?\n/, 1)[0];
+  const out = {};
+  for (const name of names) {
+    const re = new RegExp(`^${name}:\\s*(.*(?:\\r?\\n[ \\t].*)*)`, "im");
+    const m = headerBlock.match(re);
+    if (m) out[name.toLowerCase()] = m[1].replace(/\r?\n[ \t]+/g, " ").trim();
+  }
+  return out;
+}
+
+// Build a small text/plain notice for a message too large to forward whole.
+// It threads correctly (From our domain, Reply-To the original sender) and
+// tells the recipient exactly where to fetch the full original, so a large
+// email is never silently lost. `headerRaw` need only contain the headers.
+export function oversizeNotice({ headerRaw, fromAddress, destinations, bucket, key, sizeBytes }) {
+  const h = parseHeaders(headerRaw, ["from", "subject", "date"]);
+  const originalFrom = h.from || "";
+  const subject = h.subject || "(no subject)";
+  const date = h.date || "";
+  const nameMatch = originalFrom.match(/^(.*?)\s*<.+>$/);
+  const displayName = (nameMatch ? nameMatch[1] : originalFrom).replace(/"/g, "").trim();
+  const fromDomain = fromAddress.split("@")[1];
+  const newFrom = displayName
+    ? `"${displayName} via ${fromDomain}" <${fromAddress}>`
+    : `<${fromAddress}>`;
+  const mb = (sizeBytes / (1024 * 1024)).toFixed(1);
+
+  const lines = [
+    `From: ${newFrom}`,
+    originalFrom ? `Reply-To: ${originalFrom}` : null,
+    `To: ${destinations.join(", ")}`,
+    `Subject: [Large email — not auto-forwarded] ${subject}`,
+    date ? `Date: ${date}` : null,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    `A message addressed to you was ${mb} MB — over the 10 MB limit for`,
+    `automatic forwarding — so it could not be delivered whole to your inbox.`,
+    `The full original (with attachments) is archived permanently:`,
+    "",
+    `  From:    ${originalFrom || "(unknown)"}`,
+    `  Subject: ${subject}`,
+    date ? `  Date:    ${date}` : null,
+    `  Size:    ${mb} MB`,
+    "",
+    `Retrieve it from the AWS account, then open it in any mail client:`,
+    "",
+    `  aws s3 cp s3://${bucket}/${key} ./email.eml`,
+    "",
+  ].filter((l) => l !== null);
+
+  return lines.join("\r\n");
+}
+
 // True if any recipient is the heartbeat probe address (probe@<domain>).
 export function isProbe(recipients, probeLocalpart) {
   if (!probeLocalpart) return false;
