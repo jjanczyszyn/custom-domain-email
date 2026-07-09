@@ -7,6 +7,9 @@ import {
   isOversize,
   parseHeaders,
   oversizeNotice,
+  sanitizeAddressHeaders,
+  splitAddressList,
+  wrapAsAttachment,
   SES_MAX_RAW_BYTES,
 } from "../src/lib.mjs";
 
@@ -92,6 +95,83 @@ test("rewrite: existing Reply-To is not overwritten", () => {
   const out = rewrite(raw, "no-reply@example.com");
   assert.match(out, /^Reply-To: real@sender\.com$/m);
   assert.doesNotMatch(out, /Reply-To:.*jane/);
+});
+
+// The real-world failure that started this: an Outlook client emitted a broken
+// "<undisclosed-recipients:>" group, and SES rejected the whole send with
+// "Local address contains illegal character", parking the mail in the DLQ.
+const BROKEN_TO = [
+  "From: <sender@gmail.com>",
+  'To: "\'Justina Lydia\'" <hello@toward.love>,',
+  "\t<undisclosed-recipients:>",
+  "Subject: RE: hi",
+  "",
+  "Thanks!",
+].join("\r\n");
+
+test("sanitizeAddressHeaders: drops <undisclosed-recipients:>, keeps the real address", () => {
+  const out = sanitizeAddressHeaders(BROKEN_TO);
+  assert.match(out, /^To: "'Justina Lydia'" <hello@toward\.love>\r?$/m);
+  assert.doesNotMatch(out, /undisclosed-recipients/);
+});
+
+test("sanitizeAddressHeaders: does not break the header block (no stray blank line)", () => {
+  const out = sanitizeAddressHeaders(BROKEN_TO);
+  // Subject must survive as a header, i.e. the To edit didn't terminate headers.
+  assert.match(out, /^Subject: RE: hi$/m);
+  assert.match(out, /\r\n\r\nThanks!$/);
+});
+
+test("sanitizeAddressHeaders: removes a header left with no valid address entirely", () => {
+  const raw = "To: <undisclosed-recipients:>\r\nSubject: x\r\n\r\nbody";
+  const out = sanitizeAddressHeaders(raw);
+  assert.doesNotMatch(out, /^To:/m);
+  assert.match(out, /^Subject: x$/m); // headers still intact, no blank-line split
+});
+
+test("sanitizeAddressHeaders: preserves a clean multi-recipient list", () => {
+  const raw = "To: a@x.com, \"B\" <b@y.com>\r\nCc: c@z.com\r\n\r\nbody";
+  const out = sanitizeAddressHeaders(raw);
+  assert.match(out, /^To: a@x\.com, "B" <b@y\.com>$/m);
+  assert.match(out, /^Cc: c@z\.com$/m);
+});
+
+test("sanitizeAddressHeaders: keeps good addresses, drops only the malformed ones in a mixed list", () => {
+  const raw = "To: good@x.com, <undisclosed-recipients:>, also@y.com\r\n\r\nb";
+  const out = sanitizeAddressHeaders(raw);
+  assert.match(out, /^To: good@x\.com, also@y\.com$/m);
+});
+
+test("rewrite: a message with a broken recipient header now sanitizes to a sendable form", () => {
+  const out = rewrite(BROKEN_TO, "no-reply@toward.love");
+  assert.doesNotMatch(out, /undisclosed-recipients/);
+  // Bare From (no display name) rewrites to our address; sender kept in Reply-To.
+  assert.match(out, /^From: <no-reply@toward\.love>/m);
+  assert.match(out, /^Reply-To: <sender@gmail\.com>/m);
+  assert.match(out, /^To: "'Justina Lydia'" <hello@toward\.love>\r?$/m);
+});
+
+test("splitAddressList: commas inside quotes and angle brackets do not split", () => {
+  const parts = splitAddressList('"Doe, Jane" <jane@x.com>, bob@y.com');
+  assert.deepEqual(parts.map((p) => p.trim()), ['"Doe, Jane" <jane@x.com>', "bob@y.com"]);
+});
+
+test("wrapAsAttachment: builds a clean envelope with the original as message/rfc822", () => {
+  const original = "From: \"Jane\" <jane@sender.com>\r\nTo: <undisclosed-recipients:>\r\nSubject: Hi\r\n\r\nBody!";
+  const out = wrapAsAttachment(original, {
+    fromAddress: "no-reply@toward.love",
+    destinations: ["owner@gmail.com"],
+  }).toString("utf-8");
+  assert.match(out, /^From: "Jane via toward\.love" <no-reply@toward\.love>/m);
+  assert.match(out, /^Reply-To: "Jane" <jane@sender\.com>/m);
+  assert.match(out, /^To: owner@gmail\.com$/m);
+  assert.match(out, /^Subject: Hi$/m);
+  assert.match(out, /Content-Type: multipart\/mixed; boundary=/);
+  assert.match(out, /Content-Type: message\/rfc822/);
+  // The original (with its broken header) is base64-encoded inside, so SES's
+  // address parser never sees it.
+  const b64 = Buffer.from(original).toString("base64");
+  assert.ok(out.includes(b64.slice(0, 40)));
 });
 
 test("isOversize: true past the SES limit (minus margin), false below", () => {
