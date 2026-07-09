@@ -105,19 +105,23 @@ until it passes. The handler stays a thin I/O shell over the tested functions.
 
 ## Monitoring
 
-You get an email (SNS to `alert_email`) if anything breaks:
+There are deliberately **no CloudWatch alarms**. Every failure instead arrives as
+a plain email to `alert_email`, so mail always shows up in some form and you know
+to poke the pipeline for a fix:
 
-- **forwarder-errors** / **forwarder-throttles** if the Lambda fails.
-- **forwarder-dlq** if a forward fails every retry. SES invokes the forwarder
+- **Dead-lettered forwards → an email.** SES invokes the forwarder
   asynchronously, so any invocation that still throws after its retries is routed
   to an SQS dead-letter queue (`*-forwarder-dlq`) instead of vanishing. The
-  message is held there 14 days for inspection or replay, and the raw email is
-  still in S3 — so a delivery failure is always caught, never silent.
-- **heartbeat-missing** if the end-to-end pipeline goes silent. A canary emails
-  `probe@<first-domain>` hourly through the real path; the forwarder records a
-  `CanaryHeartbeat` metric on arrival. If none lands inside the window, the alarm
-  fires, which catches silent failures a plain error alarm cannot (MX changed,
-  receipt rule disabled).
+  `*-notifier` Lambda consumes that queue and emails you a summary — who it was
+  from, the subject, why it failed, and the `aws s3 cp` command to fetch the full
+  original (still in S3). A delivery failure is always surfaced, never silent.
+- **Silent pipeline → an email.** A canary emails `probe@<first-domain>` hourly
+  through the real path; the forwarder records a `CanaryHeartbeat` metric on
+  arrival. On each run the canary first checks that recent probes were recorded —
+  if none were, the whole inbound path is down (MX changed, receipt rule
+  disabled, forwarder broken) and no in-pipeline email could ever fire, so the
+  canary emails you directly. This is the one failure the DLQ notifier can't
+  catch, because nothing reaches the forwarder to dead-letter.
 
 ### Oversize mail
 
@@ -137,9 +141,6 @@ it), the forwarder:
 Either way a large email is never silently dropped. (An earlier design served the
 fallback as a one-click Lambda Function URL link, but this AWS account blocks
 public function URLs, so the private S3 archive is the durable path instead.)
-
-Confirm the SNS subscription email AWS sends after the first apply, or alarms
-cannot reach you.
 
 ## Notes
 

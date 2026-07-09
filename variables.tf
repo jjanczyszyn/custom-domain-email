@@ -29,7 +29,7 @@ variable "inbound_retention_days" {
 }
 
 variable "alert_email" {
-  description = "Address that receives CloudWatch alarm notifications. Set via .env (TF_VAR_alert_email). Confirm the SNS subscription email once."
+  description = "Address that receives plain-text failure emails (dead-lettered forwards + silent-pipeline watchdog). Set via .env (TF_VAR_alert_email)."
   type        = string
 }
 
@@ -52,7 +52,7 @@ variable "canary_rate" {
 }
 
 variable "heartbeat_window_seconds" {
-  description = "Alarm if no heartbeat is recorded within this window. Should comfortably exceed canary_rate."
+  description = "The watchdog emails you if no heartbeat is recorded within this window. Should comfortably exceed canary_rate."
   type        = number
   default     = 7200
 }
