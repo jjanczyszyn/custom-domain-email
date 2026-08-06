@@ -206,3 +206,26 @@ check against.
 | "Could not tell which domain to send as" | New message with no domain named — use `>>domain Subject` or a `SES/from:` label. |
 | Draft labelled `SES/Needs-Review` | A send was interrupted mid-flight. Check Sent before re-marking; it was deliberately not retried. |
 | Draft labelled `SES/Failed` | The send failed cleanly. The email tells you why; the draft is untouched. |
+| `Service invoked too many times for one day: gmail` | Apps Script's Gmail quota — 20,000 calls a day on a consumer account — is spent. It resets 24 hours after the first call of the day and the relay resumes on its own. Not an AWS problem. |
+
+### What a tick costs
+
+The relay runs every minute, so what one tick spends is multiplied by 1,440.
+Against a 20,000-call day that leaves roughly thirteen Gmail calls per tick, and
+an early version spent about ninety — it read every draft in the mailbox, and
+there were thirty (pre-mortem item 18).
+
+So the scan is deliberately narrow, and the execution log says which kind ran:
+
+```
+targeted scan examined 0 draft(s), sent 0     ← the normal case, ~2 Gmail calls
+full scan examined 30 draft(s), sent 0        ← once an hour, the safety net
+```
+
+A *targeted* scan asks only which threads carry `SES/Outbox` and which drafts
+were touched in the last day; it costs the same whether the mailbox holds three
+drafts or three hundred. A *full* scan walks everything once an hour, so a
+marking the narrow queries somehow miss still goes out — late, not never.
+
+If targeted scans start examining many drafts every minute, that is the thing to
+look at: it means something is matching that should not be.

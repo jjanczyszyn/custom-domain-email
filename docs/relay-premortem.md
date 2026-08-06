@@ -348,6 +348,59 @@ against the last write, not the last read. The two diverge exactly when
 something wrote in between — which is the case the optimisation is most likely
 to be reasoning about incorrectly.
 
+**18. The relay ran out of Gmail, six hours after going live.**
+
+Every tick died on its first line of real work:
+
+```
+Exception: Service invoked too many times for one day: gmail.
+    at relayTick (relay:37:27)
+```
+
+Line 37 was `GmailApp.getDrafts()`. Nothing was wrong with the code that
+followed it; there was simply no Gmail left to spend.
+
+Apps Script meters Gmail calls at 20,000 a day on a consumer account. The scan
+walked *every* draft in the mailbox and classified each one — reading its
+message, its thread, and its thread's labels — so a tick cost roughly one call
+per draft, times three. At thirty abandoned drafts and a trigger every minute,
+that is around 90 calls a minute, or 130,000 a day against an allowance of
+20,000. The relay was never going to last a day; it lasted about six hours.
+
+The mailbox was not a surprise — item 13 was found *on those same drafts*, and
+this document has said "29 pre-existing drafts" since. What went unexamined was
+what it costs to look at them, sixty times an hour, forever. A correctness
+review asked whether the loop handled every draft correctly. It did. Nobody
+asked what the loop cost, because cost is not a behaviour you see in a test.
+
+The failure then made itself worse. The top-level handler emails on any run
+failure, and this failure recurred on all 1,440 ticks — so a single stuck relay
+also spent the *separate* 100-recipients-a-day sending quota on 100 identical
+copies of the same alert, which is the quota real per-draft alerts depend on.
+
+**Mitigation:** the per-tick scan no longer scales with the mailbox. It asks
+Gmail two narrow questions instead — which threads carry the Outbox label, and
+which drafts were touched in the last day — and only reads a subject when the
+draft has actually changed, which Gmail reveals for free by replacing a draft's
+message id on every edit. An idle mailbox now costs two calls a tick regardless
+of how many drafts it holds, and the thirty abandoned ones cost nothing at all.
+
+Three layers keep that safe to be wrong. The message-id memo is re-checked
+every ten minutes anyway, in case a marking ever leaves the id alone. The full
+exhaustive walk still runs once an hour, so anything the narrow queries miss
+goes out late rather than never. And run-level alerts are throttled to one per
+fault every four hours, so a stuck relay reports itself without also destroying
+its own ability to report anything else. `scan.test.mjs` counts the reads the
+scan performs, because here the cost *is* the behaviour under test.
+
+**The lesson worth keeping:** a loop that is correct can still be unaffordable,
+and quota is consumed by the work you skip as well as the work you do. Anything
+running on a timer should be costed per tick and multiplied out to a day —
+"correct" and "sustainable" are separate reviews, and only one of them was done.
+
+A second lesson, cheaper to state: an alert that fires on a repeating condition
+needs a throttle, or the first outage takes the alarm system down with it.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The

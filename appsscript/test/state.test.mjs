@@ -18,14 +18,54 @@ function fakeProps(initial = {}) {
   };
 }
 
+/** Every declared bucket, empty — asserted against STATE_BUCKETS rather than a
+ * hard-coded list, so adding a bucket cannot leave these tests behind. */
+const empty = () => Object.fromEntries(gs.STATE_BUCKETS.map((b) => [b, {}]));
+
 test("loadState: an absent bundle yields empty buckets", () => {
   const state = gs.loadState({});
-  assert.deepEqual(state, { inflight: {}, consumed: {}, failed: {} });
+  assert.deepEqual(state, empty());
 });
 
 test("loadState: a corrupt bundle does not throw", () => {
   const state = gs.loadState({ _relayState: "{not json" });
-  assert.deepEqual(state, { inflight: {}, consumed: {}, failed: {} });
+  assert.deepEqual(state, empty());
+});
+
+/**
+ * The footgun the module header warns about: only declared buckets survive a
+ * reload. A cache bucket that is not declared is silently dropped, and the
+ * thing it gates then fires on every single tick.
+ */
+test("loadState: every declared bucket survives a round trip", () => {
+  const before = gs.emptyState();
+  for (const bucket of gs.STATE_BUCKETS) before[bucket]["k"] = { at: 1000 };
+  const after = gs.loadState({ _relayState: JSON.stringify(before) });
+  assert.deepEqual(after, before);
+});
+
+test("dueAgain: true once, then false inside the window, true after it", () => {
+  const state = gs.emptyState();
+  assert.equal(gs.dueAgain(state, "sweeps", "full", 1000, 5000), true);
+  assert.equal(gs.dueAgain(state, "sweeps", "full", 1000, 5500), false);
+  assert.equal(gs.dueAgain(state, "sweeps", "full", 1000, 6000), true);
+});
+
+/** The cache buckets must expire sooner than the guarantee buckets: `consumed`
+ * is the never-duplicate marker and must not be evicted to make room. */
+test("pruneState: caches expire on their own shorter TTL", () => {
+  const now = Date.now();
+  const state = gs.emptyState();
+  const age = now - (gs.CACHE_TTL_MS + 60_000); // past the cache TTL, inside the state TTL
+  state.consumed["a"] = { at: age };
+  state.seen["a"] = { at: age, messageId: "m1" };
+  state.notices["gmail-quota"] = { at: age };
+
+  gs.pruneState(state);
+
+  assert.ok(state.consumed["a"], "consumed must outlive the cache TTL");
+  assert.equal(state.seen["a"], undefined, "seen is a cache and must expire");
+  assert.equal(state.notices["gmail-quota"], undefined, "notices is a cache and must expire");
 });
 
 test("saveState: skips the write when nothing changed", () => {

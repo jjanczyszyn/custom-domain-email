@@ -35,6 +35,64 @@ function tryAlert(subject, body) {
 }
 
 /**
+ * How long the same run-level failure stays quiet after being reported once.
+ *
+ * Long enough that a fault lasting all day sends a handful of mails rather than
+ * hundreds, short enough that a recurring problem is still raised more than
+ * once. Per-draft failures are not throttled by this — they are already
+ * one-per-draft, and each one is a different message you are waiting on.
+ */
+var ALERT_THROTTLE_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * The whole run failed — bad configuration, or Gmail refusing to talk to us.
+ *
+ * Throttled, because this class of failure repeats on every tick by nature.
+ * The relay once ran into Gmail's daily call quota; unthrottled, that single
+ * fault would have sent this mail on all 1,440 ticks, exhausting the separate
+ * 100-recipients-a-day quota that genuine per-draft alerts depend on.
+ */
+function reportRunFailed(err, state, props) {
+  var message = errorText(err);
+
+  // Fingerprint on the message rather than the stack, so the same cause
+  // recurring from a slightly different line is still recognised as a repeat.
+  var quota = /too many times/i.test(message);
+  var key = quota ? 'gmail-quota' : message.slice(0, 120);
+
+  if (state && state.notices) {
+    if (!dueAgain(state, 'notices', key, ALERT_THROTTLE_MS, new Date().getTime())) {
+      console.log('alert suppressed; already reported "' + key + '" within the throttle window');
+      return;
+    }
+    // Persist immediately: if this tick dies before its own tidy-up, the marker
+    // must still be there, or the next tick reports the same fault again.
+    try {
+      saveState(props, state);
+    } catch (e) {
+      console.error('could not record the alert marker: ' + errorText(e));
+    }
+  }
+
+  tryAlert(
+    'Relay run failed',
+    'The relay could not complete a run. No draft was sent by it.\n\n' +
+      errorText(err, true) + '\n\n' +
+      (quota
+        ? 'This is Gmail\'s daily quota for Apps Script calls (20,000 a day on a\n' +
+          'consumer account), not an SES or AWS problem. It resets 24 hours after\n' +
+          'the first call of the day, and the relay resumes on its own.\n\n' +
+          'If it keeps recurring, the scan is reading more drafts than it should —\n' +
+          'run showConfig() and check the "scan examined" lines in the execution\n' +
+          'log. A targeted scan should examine very few drafts; a full sweep runs\n' +
+          'once an hour and examines every draft in the mailbox.\n\n'
+        : '') +
+      'Further alerts about this same failure are suppressed for ' +
+      Math.round(ALERT_THROTTLE_MS / 3600000) + ' hours.'
+  );
+}
+
+/**
  * The message was NOT sent. The draft is left intact and editable so nothing
  * is lost, and marked so it does not retry every minute — without that, a
  * permanent failure emails on every tick, forever (three alerts in ninety

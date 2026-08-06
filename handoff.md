@@ -1,4 +1,4 @@
-# Handoff — 2026-08-06 23:10 CEST
+# Handoff — 2026-08-06 23:40 CEST
 
 ## What this is
 
@@ -13,7 +13,39 @@ against, including the ones found the hard way.
 tracked files. CI blocks AWS keys and tracked private config, but it does
 **not** detect real domain names. Grep the diff before committing.
 
-## State: done and running
+## State: fixed and waiting on a Gmail quota reset
+
+⚠️ **The relay is not sending right now, and will resume on its own.** It ran
+out of Apps Script's Gmail quota (20,000 calls/day, consumer account) at about
+**21:21 UTC on 6 Aug**, after 314 ticks. The `RelayHeartbeat` metric shows it
+exactly — 60 ticks an hour from 15:32 UTC, then nothing:
+
+```bash
+aws cloudwatch get-metric-statistics --namespace EmailForwarder \
+  --metric-name RelayHeartbeat --period 3600 --statistics Sum --region us-east-1 \
+  --start-time "$(date -u -v-30H '+%Y-%m-%dT%H:%M:%SZ')" \
+  --end-time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+```
+
+The old scan read every draft in the mailbox every minute — 30 abandoned drafts
+at ~2.1 Gmail calls each is ~64 calls a tick, so the day's allowance was gone in
+under six hours. **The quota resets ~24h after the first call of the day, so
+roughly 15:30 UTC / 17:30 CEST on 7 Aug**, and the relay starts working again
+by itself. Until then, Gmail "Send as" still works — that fallback exists until
+January 2027.
+
+**The fix is written, tested, and already pushed to Apps Script** (`clasp push`,
+so the live script is the fixed one). A targeted scan now costs ~3 calls a tick
+regardless of mailbox size, with a full sweep once an hour as the safety net —
+about 6,200 calls a day against 20,000. Branch `relay-gmail-quota`, PR #3, and
+pre-mortem item 18 is the full write-up.
+
+**First thing to check after the reset:** the execution log should show
+`targeted scan examined 0 draft(s)` most minutes and `full scan examined 30` once
+an hour. Then send one real test message — the fixed scan path has never run
+against live Gmail, only against unit tests.
+
+## What was verified before all this
 
 Gmail removes "Send as" for third-party addresses in **January 2027**. The Apps
 Script relay in `appsscript/` replaces it. **PR #1 is merged to `main`.**
@@ -60,6 +92,9 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
 
 ## Open threads
 
+0. **Confirm the relay recovers** after the quota reset (see above), then send
+   one real message through it. Highest priority — nothing else matters until
+   outbound works again.
 1. **Untested: attachments.** Send a reply with a photo; confirm it arrives
    intact and appears in the Sent copy. SES caps a send at 10 MB.
 2. **CI never ran on the final commits** — GitHub's runners were backlogged for
@@ -83,6 +118,14 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
   fallback disappears.
 
 ## Gotchas that cost real time (all written up in the pre-mortem)
+
+- **A per-minute trigger gets ~13 Gmail calls a tick, and no more.** 20,000/day
+  ÷ 1,440 ticks. Anything the scan does per draft is multiplied by the size of
+  the mailbox *and* by 1,440 — cost it per day before adding it. Correct and
+  affordable are separate reviews; only the first one was done.
+- **An alert on a repeating condition needs a throttle.** The run-failure email
+  fired on every tick, so one stuck relay also burned the separate
+  100-recipients-a-day quota that the real per-draft alerts need.
 
 - **SES's `FromEmailAddress` overrides the raw message's `From` header.** Pass
   the fully formatted value or the display name is silently discarded.
