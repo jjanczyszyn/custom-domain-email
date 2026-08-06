@@ -90,7 +90,7 @@ function classifyDraft(draft, cfg, props) {
 
   var message = draft.getMessage();
   var subject = message.getSubject() || '';
-  var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart);
+  var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart, cfg.subjectToken);
 
   var thread = null;
   var labelNames = [];

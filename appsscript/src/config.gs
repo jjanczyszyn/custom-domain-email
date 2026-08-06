@@ -27,6 +27,7 @@ var PROP_ALERT_EMAIL = 'ALERT_EMAIL';
 var PROP_METRIC_NAMESPACE = 'METRIC_NAMESPACE';
 var PROP_SETTLE_SECONDS = 'SETTLE_SECONDS';
 var PROP_STALE_MINUTES = 'STALE_MINUTES';
+var PROP_SUBJECT_TOKEN = 'SUBJECT_TOKEN';
 
 /** Read and validate configuration. Throws with a useful message if unusable. */
 function getConfig() {
@@ -49,6 +50,15 @@ function getConfig() {
     metricNamespace: get(PROP_METRIC_NAMESPACE, 'EmailForwarder'),
     settleSeconds: parseInt(get(PROP_SETTLE_SECONDS, '45'), 10),
     staleMinutes: parseInt(get(PROP_STALE_MINUTES, '15'), 10),
+
+    // Set the SUBJECT_TOKEN property to an empty string to switch the subject
+    // marker off, making the SES/Outbox label the only way to send. Note the
+    // deliberate use of getProperty directly: `get()` treats '' as unset and
+    // would hand back the default, which is exactly the opposite of intent.
+    subjectToken:
+      props.getProperty(PROP_SUBJECT_TOKEN) === null
+        ? DEFAULT_SUBJECT_TOKEN
+        : props.getProperty(PROP_SUBJECT_TOKEN),
   };
 
   var missing = [];

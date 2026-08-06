@@ -12,9 +12,12 @@
 // around in lib.mjs — SES receives 40 MB but only sends 10 MB.
 var SES_MAX_RAW_BYTES = 10 * 1024 * 1024;
 
-// Subject-line marker. Works anywhere text can be typed, including the Gmail
-// mobile compose view where labelling a draft is awkward or unavailable.
-var SUBJECT_TOKEN = '>>';
+// Default subject-line marker. Works anywhere text can be typed, including the
+// Gmail mobile compose view where labelling a draft is awkward or unavailable.
+// Configurable per install via the SUBJECT_TOKEN script property; setting that
+// to an empty string disables the marker entirely, leaving the label as the
+// only way to send.
+var DEFAULT_SUBJECT_TOKEN = '>>';
 
 /** Split a raw RFC822 message into its header block and body. */
 function splitMime(raw) {
@@ -148,13 +151,20 @@ function collectRecipients(header) {
  *
  * Returns the cleaned subject so the token never reaches the recipient.
  */
-function parseSubjectToken(subject, domains, defaultLocalpart) {
+function parseSubjectToken(subject, domains, defaultLocalpart, token) {
+  var marker = token === undefined ? DEFAULT_SUBJECT_TOKEN : token;
   var s = subject || '';
+
+  // An empty marker disables the subject trigger, leaving the label as the only
+  // way to send. Without this guard indexOf('') === 0 for every subject, which
+  // would mark every draft in the mailbox for sending.
+  if (!marker) return { marked: false, alias: null, subject: s };
+
   var trimmed = s.replace(/^\s+/, '');
-  if (trimmed.indexOf(SUBJECT_TOKEN) !== 0) {
+  if (trimmed.indexOf(marker) !== 0) {
     return { marked: false, alias: null, subject: s };
   }
-  var rest = trimmed.slice(SUBJECT_TOKEN.length);
+  var rest = trimmed.slice(marker.length);
   var m = rest.match(/^([A-Za-z0-9._%+-]*@?[A-Za-z0-9.-]+\.[A-Za-z]{2,})\s+([\s\S]*)$/);
   if (m) {
     var candidate = m[1];
@@ -288,7 +298,7 @@ function validateRecipients(recipients) {
 if (typeof module !== 'undefined') {
   module.exports = Object.assign(module.exports || {}, {
     SES_MAX_RAW_BYTES: SES_MAX_RAW_BYTES,
-    SUBJECT_TOKEN: SUBJECT_TOKEN,
+    DEFAULT_SUBJECT_TOKEN: DEFAULT_SUBJECT_TOKEN,
     splitMime: splitMime,
     readHeader: readHeader,
     stripHeader: stripHeader,

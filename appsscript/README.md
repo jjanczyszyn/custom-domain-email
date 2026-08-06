@@ -31,6 +31,14 @@ Either marker sends. Use whichever suits where you are:
 | Label `SES/Outbox` | Gmail on the web | apply the label to the draft |
 | Subject prefix `>>` | anywhere, including mobile compose | `>>Thanks for today` |
 
+**An unmarked draft is never sent.** Drafts with neither marker are skipped on
+every run — the relay only ever touches what you have explicitly marked.
+
+If you would rather have one trigger instead of two, set the `SUBJECT_TOKEN`
+script property to an empty string. That turns the subject marker off and leaves
+the label as the only way to send, at the cost of sending from mobile. Set it to
+any other string to use a different prefix.
+
 Which domain it goes out as, in priority order:
 
 1. **The subject token**, when it names a domain — `>>example.net Subject here`,

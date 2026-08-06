@@ -190,6 +190,27 @@ test("parseSubjectToken: a subject that merely starts with a domain-like word is
   assert.equal(r.alias, null);
 });
 
+// An unmarked draft must never send. This is the guarantee that ordinary drafts
+// sitting in the mailbox are untouched, so it is worth asserting directly.
+test("parseSubjectToken: ordinary subjects are never marked", () => {
+  for (const s of ["Re: lunch", "> quoted", "Fwd: >>something", "", "  spaced"]) {
+    assert.equal(gs.parseSubjectToken(s, DOMAINS, "hello").marked, false, `"${s}" was marked`);
+  }
+});
+
+test("parseSubjectToken: an empty token disables the subject trigger entirely", () => {
+  // Without the guard, indexOf('') === 0 for every subject and the relay would
+  // mark the whole mailbox for sending.
+  const r = gs.parseSubjectToken(">>Would otherwise send", DOMAINS, "hello", "");
+  assert.equal(r.marked, false);
+  assert.equal(r.subject, ">>Would otherwise send");
+});
+
+test("parseSubjectToken: a custom token replaces the default", () => {
+  assert.equal(gs.parseSubjectToken("!!Go", DOMAINS, "hello", "!!").marked, true);
+  assert.equal(gs.parseSubjectToken(">>Go", DOMAINS, "hello", "!!").marked, false);
+});
+
 // ── Alias selection (premortem item 8) ───────────────────────────────────────
 
 test("resolveAlias: only configured domains resolve", () => {
