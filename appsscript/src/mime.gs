@@ -228,6 +228,29 @@ function normalizeBase64(value) {
   return s;
 }
 
+/**
+ * Find the first of our domains mentioned in a block of text.
+ *
+ * Last-resort inference for a reply Gmail never marked as one: no thread, no
+ * In-Reply-To, no References — just the quoted attribution line ("On ... ,
+ * X <someone@ourdomain> wrote:") naming the address the conversation ran through.
+ *
+ * Only the DOMAIN is taken, never the local part. An address found in a body is
+ * almost always the parent's sender — typically the no-reply@ our own forwarder
+ * rewrote it to — and sending as that would be wrong. The caller pairs the
+ * domain with the configured default local part instead.
+ */
+function inferDomainFromText(text, domains) {
+  var matches = String(text || '').match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) || [];
+  for (var i = 0; i < matches.length; i++) {
+    var domain = matches[i].split('@')[1].toLowerCase();
+    for (var j = 0; j < domains.length; j++) {
+      if (domains[j].toLowerCase() === domain) return domains[j];
+    }
+  }
+  return null;
+}
+
 /** Byte length of a string as UTF-8, without needing Buffer or Blob. */
 function utf8ByteLength(str) {
   var bytes = 0;
@@ -327,6 +350,7 @@ if (typeof module !== 'undefined') {
     parseSubjectToken: parseSubjectToken,
     resolveAlias: resolveAlias,
     inferAlias: inferAlias,
+    inferDomainFromText: inferDomainFromText,
     normalizeBase64: normalizeBase64,
     utf8ByteLength: utf8ByteLength,
     isOversize: isOversize,

@@ -136,15 +136,23 @@ function classifyDraft(draft, cfg, props) {
   }
 
   // Premortem 8: infer the alias, allow an explicit override, otherwise refuse.
+  var diag = [];
   var alias = token.alias || aliasFromLabels(labelNames, cfg);
-  if (!alias && thread) alias = inferAlias(threadRecipients(thread), cfg.domains, cfg.defaultLocalpart);
+  if (!alias && thread) {
+    var threadCandidates = threadRecipients(thread);
+    diag.push('thread ' + thread.getId() + ' has ' + thread.getMessageCount() + ' message(s)');
+    diag.push('thread recipients: ' + (threadCandidates.join(', ') || '(none)'));
+    alias = inferAlias(threadCandidates, cfg.domains, cfg.defaultLocalpart);
+  } else if (!alias) {
+    diag.push('the draft has no thread');
+  }
 
   // Gmail does not always put a reply in the same thread as the message it
   // answers — compose on mobile, or reply to forwarded mail, and the draft can
   // land in a thread of its own. The thread then holds nothing to infer from
   // even though the original was plainly addressed to one of our domains.
   // The reply headers are authoritative where Gmail's threading is not.
-  if (!alias) alias = aliasFromReplyHeaders(id, cfg);
+  if (!alias) alias = aliasFromReplyHeaders(id, cfg, diag);
 
   // A draft that names no resolvable domain will never resolve one by itself —
   // waiting is pointless and, worse, silent. Treat it as a failure now, so you
@@ -160,7 +168,8 @@ function classifyDraft(draft, cfg, props) {
         'nothing to infer from.\n\n' +
         'Name the domain in the subject — ">>' + (cfg.domains[0] || 'yourdomain') +
         ' Your subject" — or add a "' + LABEL_FROM_PREFIX + '<domain>" label. ' +
-        'Editing the draft is enough to make the relay try again.',
+        'Editing the draft is enough to make the relay try again.\n\n' +
+        'What was examined:\n  ' + diag.join('\n  '),
     };
   }
 
@@ -193,24 +202,52 @@ function aliasFromLabels(labelNames, cfg) {
  * runs after thread inference has already come up empty, since it costs a raw
  * fetch and a search per draft.
  */
-function aliasFromReplyHeaders(draftId, cfg) {
+function aliasFromReplyHeaders(draftId, cfg, diag) {
   try {
     var header = splitMime(fetchRawDraft(draftId)).header;
-    var refs =
-      (readHeader(header, 'In-Reply-To') + ' ' + readHeader(header, 'References'))
-        .match(/<[^>]+>/g) || [];
+    var inReplyTo = readHeader(header, 'In-Reply-To');
+    var references = readHeader(header, 'References');
+    diag.push('In-Reply-To: ' + (inReplyTo || '(none)'));
+    diag.push('References: ' + (references || '(none)'));
+
+    // Some clients only record the parent in the body's quote, not in headers.
+    // Fall back to the draft's own To/Cc, which at least names the conversation.
+    var refs = (inReplyTo + ' ' + references).match(/<[^>]+>/g) || [];
+    if (!refs.length) {
+      var own = collectRecipients(header);
+      diag.push('draft To/Cc: ' + own.to.concat(own.cc).join(', ') || '(none)');
+      var fromOwn = inferAlias(own.to.concat(own.cc), cfg.domains, cfg.defaultLocalpart);
+      if (fromOwn) {
+        diag.push('resolved from the draft\'s own recipients');
+        return fromOwn;
+      }
+    }
 
     // Newest reference first: the immediate parent is the best evidence of
     // which of our addresses this conversation actually reached.
     for (var i = refs.length - 1; i >= 0; i--) {
       var id = refs[i].replace(/^</, '').replace(/>$/, '');
       var threads = GmailApp.search('rfc822msgid:' + id, 0, 1);
+      diag.push('lookup ' + id + ' -> ' + (threads.length ? 'found' : 'not found'));
       if (!threads.length) continue;
-      var alias = inferAlias(threadRecipients(threads[0]), cfg.domains, cfg.defaultLocalpart);
+      var candidates = threadRecipients(threads[0]);
+      diag.push('  parent recipients: ' + (candidates.join(', ') || '(none)'));
+      var alias = inferAlias(candidates, cfg.domains, cfg.defaultLocalpart);
       if (alias) return alias;
     }
+
+    // Last resort: the quoted attribution line. When Gmail records no reply
+    // headers and no thread, the body is the only remaining evidence of which
+    // conversation this answers — "On ..., X <someone@ourdomain> wrote:".
+    var body = splitMime(fetchRawDraft(draftId)).body;
+    var domain = inferDomainFromText(body, cfg.domains);
+    diag.push('quoted body mentions: ' + (domain || '(no domain of ours)'));
+    if (domain) {
+      diag.push('resolved from the quoted body (domain only)');
+      return cfg.defaultLocalpart + '@' + domain;
+    }
   } catch (e) {
-    console.warn('reply-header inference failed: ' + (e.message || e));
+    diag.push('content inference threw: ' + (e.message || e));
   }
   return null;
 }

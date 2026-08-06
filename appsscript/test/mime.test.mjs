@@ -236,6 +236,32 @@ test("inferAlias: no configured domain in the thread means no guess", () => {
   assert.equal(gs.inferAlias(["a@external.com"], DOMAINS, "hello"), null);
 });
 
+// ── Last-resort inference from quoted text ───────────────────────────────────
+
+test("inferDomainFromText: finds our domain in a quoted attribution line", () => {
+  const body = 'On Thu, 6 Aug 2026 at 19:23, Ada via example.net\r\n<no-reply@example.net> wrote:\r\n> hi';
+  assert.equal(gs.inferDomainFromText(body, DOMAINS), "example.net");
+});
+
+test("inferDomainFromText: ignores domains that are not ours", () => {
+  assert.equal(gs.inferDomainFromText("mail to someone@stranger.com", DOMAINS), null);
+});
+
+test("inferDomainFromText: returns the domain only, never the local part", () => {
+  // The address in a body is usually the parent's sender, so its local part
+  // must not become the sending identity.
+  assert.equal(gs.inferDomainFromText("<no-reply@example.org>", DOMAINS), "example.org");
+});
+
+test("inferDomainFromText: a bare domain with no address does not match", () => {
+  assert.equal(gs.inferDomainFromText("visit https://example.net today", DOMAINS), null);
+});
+
+test("inferDomainFromText: empty and null input are safe", () => {
+  assert.equal(gs.inferDomainFromText("", DOMAINS), null);
+  assert.equal(gs.inferDomainFromText(null, DOMAINS), null);
+});
+
 // ── base64url normalisation ──────────────────────────────────────────────────
 
 test("normalizeBase64: converts base64url characters to standard base64", () => {
