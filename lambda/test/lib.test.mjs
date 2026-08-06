@@ -102,7 +102,7 @@ test("rewrite: existing Reply-To is not overwritten", () => {
 // "Local address contains illegal character", parking the mail in the DLQ.
 const BROKEN_TO = [
   "From: <sender@gmail.com>",
-  'To: "\'Justina Lydia\'" <hello@toward.love>,',
+  'To: "\'Ada Lovelace\'" <hello@example.net>,',
   "\t<undisclosed-recipients:>",
   "Subject: RE: hi",
   "",
@@ -111,7 +111,7 @@ const BROKEN_TO = [
 
 test("sanitizeAddressHeaders: drops <undisclosed-recipients:>, keeps the real address", () => {
   const out = sanitizeAddressHeaders(BROKEN_TO);
-  assert.match(out, /^To: "'Justina Lydia'" <hello@toward\.love>\r?$/m);
+  assert.match(out, /^To: "'Ada Lovelace'" <hello@example\.net>\r?$/m);
   assert.doesNotMatch(out, /undisclosed-recipients/);
 });
 
@@ -143,12 +143,12 @@ test("sanitizeAddressHeaders: keeps good addresses, drops only the malformed one
 });
 
 test("rewrite: a message with a broken recipient header now sanitizes to a sendable form", () => {
-  const out = rewrite(BROKEN_TO, "no-reply@toward.love");
+  const out = rewrite(BROKEN_TO, "no-reply@example.net");
   assert.doesNotMatch(out, /undisclosed-recipients/);
   // Bare From (no display name) rewrites to our address; sender kept in Reply-To.
-  assert.match(out, /^From: <no-reply@toward\.love>/m);
+  assert.match(out, /^From: <no-reply@example\.net>/m);
   assert.match(out, /^Reply-To: <sender@gmail\.com>/m);
-  assert.match(out, /^To: "'Justina Lydia'" <hello@toward\.love>\r?$/m);
+  assert.match(out, /^To: "'Ada Lovelace'" <hello@example\.net>\r?$/m);
 });
 
 test("splitAddressList: commas inside quotes and angle brackets do not split", () => {
@@ -159,10 +159,10 @@ test("splitAddressList: commas inside quotes and angle brackets do not split", (
 test("wrapAsAttachment: builds a clean envelope with the original as message/rfc822", () => {
   const original = "From: \"Jane\" <jane@sender.com>\r\nTo: <undisclosed-recipients:>\r\nSubject: Hi\r\n\r\nBody!";
   const out = wrapAsAttachment(original, {
-    fromAddress: "no-reply@toward.love",
+    fromAddress: "no-reply@example.net",
     destinations: ["owner@gmail.com"],
   }).toString("utf-8");
-  assert.match(out, /^From: "Jane via toward\.love" <no-reply@toward\.love>/m);
+  assert.match(out, /^From: "Jane via example\.net" <no-reply@example\.net>/m);
   assert.match(out, /^Reply-To: "Jane" <jane@sender\.com>/m);
   assert.match(out, /^To: owner@gmail\.com$/m);
   assert.match(out, /^Subject: Hi$/m);

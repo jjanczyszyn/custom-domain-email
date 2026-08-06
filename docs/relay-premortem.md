@@ -1,0 +1,226 @@
+# Pre-mortem: the Gmail → SES outbound relay
+
+> It is March 2027. The relay has been the only way to send as our domains for
+> two months, and it has gone badly wrong. What happened?
+
+This document was written *before* the code, and the code was then written to
+close each item. Every failure below names its mitigation and where that
+mitigation lives. Items marked **ACCEPTED** are real risks we chose to live
+with, with the reasoning recorded.
+
+Ranked by how bad the outcome is, not how likely.
+
+---
+
+## 1. A client received the same email four times
+
+**The worst outcome.** Duplicate mail to a coaching client is embarrassing in a
+way a delayed send is not.
+
+The mechanism: the script hands the message to SES, then dies before it can
+clear the outbox marker — Apps Script's 6-minute execution ceiling, a Google
+infrastructure blip, a quota trip. One minute later the trigger fires again,
+finds the draft still marked, and sends it again. And again.
+
+**Mitigation — clear the marker *before* calling SES.** `relay.gs` removes the
+outbox label and strips the subject token as its first action on a draft, and
+only then builds and transmits. A crash at any point after that leaves a draft
+that is no longer eligible, so the next run ignores it. The failure mode
+inverts from "sends repeatedly" to "silently doesn't send", which item 3 then
+catches.
+
+**Mitigation — an explicit in-flight record.** Before the SES call the script
+writes `inflight:<draftId>` to Script Properties with the generated
+Message-ID; after a confirmed response it deletes that record. A record still
+present on the next run means a send whose outcome is *unknown*.
+
+**Policy: never auto-retry an unknown-state send.** We cannot ask SES "did you
+accept this message". So an orphaned in-flight record does not trigger a retry
+— it labels the draft `SES/Needs-Review` and emails the alert address saying
+"this may or may not have gone out; check your Sent folder and decide."
+Duplicates are worse than a send you have to confirm by hand.
+
+## 2. Every Bcc recipient was exposed to everyone else on the email
+
+Gmail's raw draft MIME includes the `Bcc:` header. Hand that raw message to SES
+unchanged and whether the header survives to recipients depends on SES's
+internal behaviour — which is not a thing to bet a client's privacy on.
+
+**Mitigation — strip `Bcc` from the transmitted bytes, unconditionally.**
+`buildOutbound()` in `mime.gs` removes `Bcc` (and `Resent-Bcc`) from the
+outgoing headers and returns the blind recipients separately, to be passed to
+SES via the `Destination.BccAddresses` API parameter instead. Delivery is
+driven by the API parameter; the header is never transmitted. This is the same
+lesson the inbound path already learned — the envelope and the headers are
+different things (`lib.mjs:142`).
+
+The copy filed in Sent *keeps* its `Bcc` header, because that is what Gmail
+does natively and you need to see who you blind-copied. Two variants, one
+Message-ID. Covered by `mime.test.mjs`.
+
+## 3. Mail sat unsent for a week and nobody noticed
+
+The trigger got disabled — an Apps Script auth lapse, a Google-side pause after
+repeated failures, someone deleting it during unrelated cleanup. Drafts piled
+up marked-but-unsent. No error, because nothing ran to produce one.
+
+This is the exact failure the inbound canary already exists to catch, and it
+needs the same answer: *the absence of activity is itself the alarm.*
+
+**Mitigation — a heartbeat that runs on the AWS side, not in Apps Script.** A
+watchdog cannot live inside the thing it watches. Every successful relay run
+writes a `RelayHeartbeat` metric to CloudWatch. The existing canary Lambda,
+which already runs hourly and already checks `CanaryHeartbeat`, also checks
+that the relay has reported in within its window — and emails you when it has
+not. If Apps Script dies entirely, AWS notices.
+
+**Mitigation — a stale-draft sweep.** Each run also counts drafts that have
+carried the outbox marker for more than 15 minutes and reports them, catching
+the case where the trigger runs but individual sends keep failing.
+
+## 4. Replies stopped threading and every conversation fragmented
+
+The message SES transmitted and the copy filed in Sent carried different
+`Message-ID` values. The recipient's reply cites the transmitted ID; Gmail
+holds the archived one; nothing matches; the conversation splits into
+fragments.
+
+**Mitigation — generate the Message-ID ourselves, before sending.** The script
+mints `<uuid@domain>` and writes it into the headers, so the transmitted bytes
+and the archived bytes carry the same identifier. We never let SES assign one.
+`ensureMessageId()` is pure and tested.
+
+**Verified, not assumed:** the inbound forwarder preserves `In-Reply-To`,
+`References`, and `Message-ID` — `rewrite()` at `lambda/src/lib.mjs:112` strips
+only `Return-Path`, `Sender`, `DKIM-Signature`, and `X-SES-*`. So a reply
+coming back in threads against the archived copy. The round trip closes.
+
+## 5. It sent a half-written draft
+
+You marked the draft, then kept typing. The trigger fired mid-sentence.
+
+**Mitigation — a settling delay.** A draft must be unmodified for
+`SETTLE_SECONDS` (default 45) before it is eligible. `relay.gs` compares the
+draft's last-saved date against now and defers anything still warm. This
+doubles as the undo window: the send is not committed until roughly a minute
+after you mark it, and removing the marker in that window cancels it.
+
+## 6. Two trigger runs overlapped and raced each other
+
+Apps Script does not guarantee a run finishes before the next fires. A slow run
+processing a large attachment can still be live when the next minute ticks.
+
+**Mitigation — `LockService.getScriptLock()`** with a zero-wait acquisition. A
+second concurrent run exits immediately rather than queuing, because the work
+is idempotent-by-marker and will be picked up on the next tick anyway.
+
+## 7. Sending broke completely and every send failed
+
+Sub-cases, all landing in the same place:
+
+- **SigV4 signing bug.** Signature mismatches are unforgiving and easy to get
+  wrong. Mitigated by keeping the signing algorithm pure and injecting the
+  crypto primitives, so it is unit-tested against AWS's published
+  `sigv4_testsuite` vectors under Node (`sigv4.test.mjs`) rather than debugged
+  live in the Apps Script editor.
+- **IAM credentials revoked or rotated.** Returns 403. Surfaced as a failure
+  email naming the status code.
+- **The message exceeds 10 MB.** SES's hard send ceiling — the same limit the
+  inbound path already works around. Checked *before* transmitting so it fails
+  cleanly with a useful message instead of a raw API error.
+- **A malformed recipient address.** SES rejects the entire send over one bad
+  token. This bit the inbound path already, and the fix is reused: recipient
+  addresses are validated before the call and unparseable ones are reported by
+  name rather than silently dropped, because on outbound a dropped recipient
+  means a person who didn't get your email.
+
+**Mitigation — failure is always an email.** Matching the project's existing
+philosophy: no alarms, no dashboards. Any send that fails labels the draft
+`SES/Failed`, leaves it intact and editable, and emails `ALERT_EMAIL` with the
+recipient, subject, and the actual error.
+
+## 8. It sent from the wrong domain
+
+After January 2027 Gmail will not offer the alias in the From picker at all —
+every draft is authored as the Gmail address. Something must decide which of
+the four domains a message goes out as, and picking wrong means a client sees
+the wrong brand.
+
+**Mitigation — infer, then allow explicit override, then refuse.** For a reply,
+the alias is inferred from the domain the thread was originally addressed to,
+which is the same rule as Gmail's "reply from the same address" setting. For a
+new message it must be stated explicitly, via the `SES/from:<domain>` label or
+the subject token (`>>example.net Subject here`). If neither is available the
+script **refuses to send** and asks, rather than guessing a default. A message
+that doesn't go out is recoverable; one sent under the wrong brand is not.
+
+## 9. The marker was unusable on a phone
+
+The design assumed labelling a draft. In the Gmail mobile app a draft opens
+straight into the compose view, which has no labelling affordance — you have to
+back out to the Drafts list and long-press the conversation, and on iOS it may
+not be offered at all. Given how much of this workflow is phone-driven, a
+web-only trigger would have been a design failure.
+
+**Mitigation — two independent markers.** A label (`SES/Outbox`) for web, and a
+**subject prefix token** (`>>`) that works anywhere text can be typed,
+including mobile compose. The token is parsed from the `Subject` header — no
+MIME body parsing, no encoding minefield — and stripped before transmission.
+Either marker sends; you never have to remember which surface you're on.
+
+## 10. The AWS key leaked
+
+The relay needs credentials in Script Properties. Anyone with edit access to
+the script can read them, and Apps Script projects are easy to share by
+accident.
+
+**Mitigation — a dedicated, minimally-scoped IAM user.** Not the SMTP user, not
+anything reused. `ses:SendEmail` and `ses:SendRawEmail` only, restricted by
+condition to the four verified identities. A leak lets the holder send as your
+domains — bad — but grants no read access to inbound mail in S3, no ability to
+change DNS, and nothing else in the account. Provisioned in Terraform
+alongside the existing SMTP user so it is revocable with one apply.
+
+**ACCEPTED:** anyone with access to the Gmail account can already send as these
+domains today. The relay does not widen that.
+
+## 11. Deliverability quietly degraded
+
+Outbound already goes through SES today via Send-As, so the relay changes the
+compose surface, not the sending path — SPF/DKIM/DMARC behaviour is unchanged
+by definition. Recorded here because the audit surfaced two real weaknesses
+that predate this work:
+
+- `example.net` publishes `v=spf1 include:_spf.maileroo.com
+  include:_spf.google.com ~all` — **no `include:amazonses.com`**. SES-sent mail
+  therefore fails SPF and is carried entirely by DKIM alignment.
+- `example.com`, `example.org`, and `example.test` publish no SPF record
+  at all (neutral, not a fail — again carried by DKIM).
+
+DKIM is verified and passing on all four, so DMARC aligns and mail is
+deliverable. But it rests on a single mechanism with no margin. **Not fixed in
+this change** — `example.net` has a live Maileroo sender and editing its SPF is
+a separate, independently-testable change that should not ride along with a new
+relay. Flagged for its own PR.
+
+## 12. Nobody could tell if a send had actually worked
+
+**ACCEPTED, with instrumentation.** There is no delivery receipt. Success means
+"SES accepted the message", not "it arrived". The archived Sent copy is written
+only after SES returns a 200 with a message ID, so a message in Sent means SES
+took responsibility for it. Bounces land in the existing inbound pipeline and
+arrive in the inbox like any other mail.
+
+---
+
+## Deliberately not solved
+
+- **Undo Send.** Gmail's is a client-side hold, unavailable to us. The
+  45-second settling delay in item 5 is the substitute: unmark within it and
+  nothing goes out.
+- **Scheduled send.** Gmail's scheduler sends through Gmail, so it would go out
+  as the Gmail address and bypass the relay entirely. Marking a draft schedules
+  nothing; write it and mark it when you want it gone.
+- **Read receipts / open tracking.** Out of scope and unwanted.
+- **Sub-minute latency.** Apps Script's floor for time-driven triggers is one
+  minute. Irreducible without abandoning Apps Script.

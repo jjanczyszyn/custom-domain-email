@@ -120,6 +120,8 @@ resource "aws_lambda_function" "canary" {
       ALERT_EMAIL              = var.alert_email
       METRIC_NAMESPACE         = var.metric_namespace
       HEARTBEAT_WINDOW_SECONDS = tostring(var.heartbeat_window_seconds)
+      RELAY_ENABLED            = tostring(var.relay_enabled)
+      RELAY_WINDOW_SECONDS     = tostring(var.relay_window_seconds)
     }
   }
 

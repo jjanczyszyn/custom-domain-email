@@ -22,3 +22,14 @@ output "smtp_password" {
   value       = aws_iam_access_key.smtp.ses_smtp_password_v4
   sensitive   = true
 }
+
+output "relay_access_key_id" {
+  description = "AWS_ACCESS_KEY_ID for the Apps Script relay's Script Properties."
+  value       = aws_iam_access_key.relay.id
+}
+
+output "relay_secret_access_key" {
+  description = "Run: terraform output -raw relay_secret_access_key"
+  value       = aws_iam_access_key.relay.secret
+  sensitive   = true
+}

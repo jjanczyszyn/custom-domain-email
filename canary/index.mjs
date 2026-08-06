@@ -8,20 +8,23 @@ const PROBE = process.env.PROBE_ADDRESS;
 const ALERT_EMAIL = process.env.ALERT_EMAIL;
 const NAMESPACE = process.env.METRIC_NAMESPACE || "EmailForwarder";
 const WINDOW_SECONDS = parseInt(process.env.HEARTBEAT_WINDOW_SECONDS || "7200", 10);
+const RELAY_ENABLED = process.env.RELAY_ENABLED === "true";
+const RELAY_WINDOW_SECONDS = parseInt(process.env.RELAY_WINDOW_SECONDS || "3600", 10);
 
-// How many CanaryHeartbeat points the forwarder recorded within the window.
-// The forwarder emits this metric when a probe reaches it through the real
-// inbound path, so a zero means that path is broken.
-async function heartbeatsInWindow() {
+// How many points of a heartbeat metric were recorded within a window.
+// CanaryHeartbeat is emitted by the forwarder when a probe reaches it through
+// the real inbound path, so a zero means that path is broken. RelayHeartbeat is
+// emitted by the Apps Script outbound relay on every run.
+async function heartbeatsInWindow(metricName = "CanaryHeartbeat", windowSeconds = WINDOW_SECONDS) {
   const end = new Date();
-  const start = new Date(end.getTime() - WINDOW_SECONDS * 1000);
+  const start = new Date(end.getTime() - windowSeconds * 1000);
   const res = await cw.send(
     new GetMetricStatisticsCommand({
       Namespace: NAMESPACE,
-      MetricName: "CanaryHeartbeat",
+      MetricName: metricName,
       StartTime: start,
       EndTime: end,
-      Period: Math.max(60, WINDOW_SECONDS),
+      Period: Math.max(60, windowSeconds),
       Statistics: ["Sum"],
     })
   );
@@ -61,6 +64,33 @@ export const handler = async () => {
   } catch (err) {
     // A check failure must never stop the probe from going out.
     console.error(`Heartbeat check failed: ${err.name} ${err.message}`);
+  }
+
+  // The outbound relay runs inside Apps Script, so it cannot report its own
+  // death — a trigger that has been disabled or revoked simply stops, with no
+  // error to send anywhere. That silence is only visible from outside Google,
+  // which is here. See docs/relay-premortem.md item 3.
+  if (RELAY_ENABLED) {
+    try {
+      const relayBeats = await heartbeatsInWindow("RelayHeartbeat", RELAY_WINDOW_SECONDS);
+      if (relayBeats === 0) {
+        const mins = Math.round(RELAY_WINDOW_SECONDS / 60);
+        await emailAlert("[Outbound relay silent — mail may not be sending]", [
+          `The Gmail -> SES relay has not reported in for ${mins} minutes.`,
+          "",
+          "It runs on a one-minute Apps Script trigger, so any silence this long",
+          "means it is not running. Drafts you mark for sending are NOT going out.",
+          "",
+          "Likely causes: the Apps Script trigger was disabled or deleted, the",
+          "script's Google authorisation lapsed, or Apps Script paused it after",
+          "repeated failures. Open the Apps Script project, check Triggers and",
+          "Executions, and re-run setUp() if the trigger is gone.",
+        ].join("\n"));
+        console.log(`Relay-silent alert emailed -> ${ALERT_EMAIL}`);
+      }
+    } catch (err) {
+      console.error(`Relay heartbeat check failed: ${err.name} ${err.message}`);
+    }
   }
 
   const stamp = new Date().toISOString();

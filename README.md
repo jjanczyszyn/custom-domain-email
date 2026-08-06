@@ -60,6 +60,12 @@ After cutover:
    One credential set works for every domain. Gmail emails a confirmation code to
    `hello@yourdomain`, which now forwards into your inbox.
 
+   > **Gmail removes "Send as" for third-party addresses in January 2027**, and
+   > will restrict *new* configurations before then. Set this up now if you
+   > still can — it works until the deadline — but the durable replacement is
+   > the outbound relay below. Inbound forwarding is explicitly unaffected by
+   > that change.
+
 5. **Leave the sandbox** (optional, free) to reply to anyone, not just verified
    addresses: request production access in the SES console.
 
@@ -75,6 +81,25 @@ give the address its own free Google profile:
 3. Enter the verification code Google sends (it forwards into your inbox).
 4. Set the profile photo. Recipients now see it next to your emails.
 
+## Sending after January 2027
+
+Gmail is removing "Send as" for third-party addresses in January 2027. That
+kills the outbound half of this project — the inbound half is untouched, and
+Google confirms that forwarding into Gmail is unaffected.
+
+[`appsscript/`](appsscript/) is the replacement, and it keeps composing in
+Gmail. Write a draft as normal, mark it with the `SES/Outbox` label or a `>>`
+subject prefix, and a one-minute Apps Script trigger relays it through SES as
+one of your domains, then files the copy in Sent with the same Message-ID so
+replies keep threading. Works on web and mobile; costs nothing extra.
+
+Setup is in [`appsscript/README.md`](appsscript/README.md). The design, and the
+failure cases it is built around, are in
+[`docs/relay-premortem.md`](docs/relay-premortem.md).
+
+Both paths work until the deadline, so run them side by side and compare before
+Send-As disappears.
+
 ## How it works
 
 ```
@@ -82,6 +107,7 @@ mail -> Route53 MX -> SES receipt rule -> S3 (raw) ┐
                                                     ├─> Lambda -> SES SendRawEmail -> Gmail
                                              invoke ┘
 reply <- Gmail "Send mail as" <- SES SMTP <───────────────────────────────────────────────┘
+   or <- Apps Script relay ---- SES API <──────────────────────────────────────────────────┘
 ```
 
 - **`main.tf`** loads `config/domains.yaml` and builds the routing map.
@@ -90,6 +116,7 @@ reply <- Gmail "Send mail as" <- SES SMTP <────────────�
 - **`monitoring.tf`** SNS alerts, alarms, heartbeat canary.
 - **`lambda/src/`** forwarder runtime (`lib.mjs` pure logic, `index.mjs` handler).
 - **`lambda/test/`** unit tests. **`canary/`** heartbeat sender.
+- **`appsscript/`** the outbound relay that replaces Gmail "Send as".
 
 ## Tests
 
@@ -151,3 +178,10 @@ public function URLs, so the private S3 archive is the durable path instead.)
 - Region defaults to `us-east-1` because SES inbound is region-limited
   (us-east-1, us-west-2, eu-west-1).
 - Raw emails auto-delete from S3 after 30 days.
+- **This repo is public.** Your domains and addresses live in `config/domains.yaml`
+  and `.env`, both gitignored, and CI fails the build if either becomes tracked
+  or if an AWS key appears in a tracked file. Test fixtures use RFC 2606 reserved
+  example domains. One caveat: a real domain and name were committed in a test
+  fixture in `c87e925` and are still reachable in git history — the working tree
+  is clean, but scrubbing history needs a force-push, which rewrites hashes for
+  anyone who has cloned or forked.

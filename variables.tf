@@ -51,6 +51,18 @@ variable "canary_rate" {
   default     = "rate(1 hour)"
 }
 
+variable "relay_enabled" {
+  description = "Watch the Apps Script outbound relay's heartbeat. Leave false until the relay is installed, or the canary will email about a relay that was never there."
+  type        = bool
+  default     = false
+}
+
+variable "relay_window_seconds" {
+  description = "The watchdog emails you if the relay records no heartbeat within this window. The relay runs every minute, so an hour is already a long silence."
+  type        = number
+  default     = 3600
+}
+
 variable "heartbeat_window_seconds" {
   description = "The watchdog emails you if no heartbeat is recorded within this window. Should comfortably exceed canary_rate."
   type        = number

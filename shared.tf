@@ -163,3 +163,43 @@ resource "aws_iam_user_policy" "smtp" {
 resource "aws_iam_access_key" "smtp" {
   user = aws_iam_user.smtp.name
 }
+
+# ── Relay user for the Apps Script outbound relay ────────────────────────────
+# Separate from the SMTP user on purpose: these credentials live in Google's
+# Script Properties, outside AWS, so they are scoped as tightly as possible and
+# can be revoked on their own. A leak lets the holder send as these domains and
+# nothing else — no access to inbound mail in S3, no DNS, no other service.
+# See docs/relay-premortem.md item 10.
+resource "aws_iam_user" "relay" {
+  name = "${var.project}-relay"
+}
+
+resource "aws_iam_user_policy" "relay" {
+  name = "relay-send"
+  user = aws_iam_user.relay.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SendAsVerifiedDomainsOnly"
+        Effect = "Allow"
+        Action = ["ses:SendEmail", "ses:SendRawEmail"]
+        Resource = [
+          for d in keys(local.domains) :
+          "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${d}"
+        ]
+      },
+      {
+        Sid       = "RelayHeartbeatOnly"
+        Effect    = "Allow"
+        Action    = ["cloudwatch:PutMetricData"]
+        Resource  = "*"
+        Condition = { StringEquals = { "cloudwatch:namespace" = var.metric_namespace } }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_access_key" "relay" {
+  user = aws_iam_user.relay.name
+}

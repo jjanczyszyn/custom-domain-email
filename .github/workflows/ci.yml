@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Forwarder unit tests
+        working-directory: lambda
+        run: npm test
+
+      - name: Relay unit tests
+        working-directory: appsscript
+        run: npm test
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Formatting
+        run: terraform fmt -check -recursive
+
+      # Validation only — no credentials, no backend, nothing applied.
+      - name: Validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository is public. Real domains and addresses belong in the
+      # gitignored config/domains.yaml and .env, never in tracked files.
+      - name: No AWS keys in tracked files
+        run: |
+          if git grep -nE '(AKIA|ASIA)[A-Z0-9]{16}' -- . ':!*.md'; then
+            echo "::error::An AWS access key ID appears in a tracked file."
+            exit 1
+          fi
+
+      - name: No private config committed
+        run: |
+          if git ls-files --error-unmatch config/domains.yaml .env 2>/dev/null; then
+            echo "::error::Private config is tracked; it must stay gitignored."
+            exit 1
+          fi
+          exit 0

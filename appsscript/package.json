@@ -1,0 +1,10 @@
+{
+  "name": "relay-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Test harness for the Gmail -> SES relay. Runtime code lives in src/ (what gets deployed to Apps Script).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
