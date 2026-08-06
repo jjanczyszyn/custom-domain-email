@@ -9,10 +9,82 @@
  * mime.gs and sigv4.gs and is unit-tested under Node.
  */
 
+// Legacy per-draft marker keys. Kept only so loadState can absorb and remove
+// any left over from before all state moved into a single property.
 var PROP_INFLIGHT_PREFIX = 'inflight:';
 var PROP_CONSUMED_PREFIX = 'consumed:';
 var PROP_FAILED_PREFIX = 'failed:';
-var CONSUMED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// All runtime state lives under one key. Script Properties is the same surface
+// that holds your credentials and configuration, so scattering a marker per
+// draft across it buries the settings you actually edit. The leading underscore
+// marks it as internal.
+var PROP_STATE = '_relayState';
+var STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Read the state bundle, absorbing any legacy per-draft keys and deleting them.
+ * The migration is a no-op once it has run.
+ */
+function loadState(props) {
+  var state = { inflight: {}, consumed: {}, failed: {} };
+
+  var raw = props.getProperty(PROP_STATE);
+  if (raw) {
+    try {
+      var parsed = JSON.parse(raw);
+      state.inflight = parsed.inflight || {};
+      state.consumed = parsed.consumed || {};
+      state.failed = parsed.failed || {};
+    } catch (e) {
+      console.warn('relay state was unreadable; starting fresh');
+    }
+  }
+
+  var all = props.getProperties();
+  var migrated = 0;
+  for (var key in all) {
+    if (!all.hasOwnProperty(key)) continue;
+    var bucket = null;
+    var prefix = '';
+    if (key.indexOf(PROP_INFLIGHT_PREFIX) === 0) { bucket = state.inflight; prefix = PROP_INFLIGHT_PREFIX; }
+    else if (key.indexOf(PROP_CONSUMED_PREFIX) === 0) { bucket = state.consumed; prefix = PROP_CONSUMED_PREFIX; }
+    else if (key.indexOf(PROP_FAILED_PREFIX) === 0) { bucket = state.failed; prefix = PROP_FAILED_PREFIX; }
+    if (!bucket) continue;
+
+    var id = key.slice(prefix.length);
+    var value;
+    try {
+      value = JSON.parse(all[key]);
+    } catch (e) {
+      value = { at: parseInt(all[key], 10) || 0 };
+    }
+    bucket[id] = value;
+    props.deleteProperty(key);
+    migrated++;
+  }
+  if (migrated) console.log('migrated ' + migrated + ' legacy marker(s) into ' + PROP_STATE);
+
+  return state;
+}
+
+function saveState(props, state) {
+  props.setProperty(PROP_STATE, JSON.stringify(state));
+}
+
+/** Drop entries older than the TTL so the bundle cannot grow without bound. */
+function pruneState(state) {
+  var cutoff = new Date().getTime() - STATE_TTL_MS;
+  var buckets = ['inflight', 'consumed', 'failed'];
+  for (var b = 0; b < buckets.length; b++) {
+    var bucket = state[buckets[b]];
+    for (var id in bucket) {
+      if (!bucket.hasOwnProperty(id)) continue;
+      var at = bucket[id] && bucket[id].at;
+      if (!at || at < cutoff) delete bucket[id];
+    }
+  }
+}
 
 /** Trigger entry point. */
 function relayTick() {
@@ -27,8 +99,9 @@ function relayTick() {
   try {
     var cfg = getConfig();
     var props = PropertiesService.getScriptProperties();
+    var state = loadState(props);
 
-    reconcileInflight(cfg, props);
+    reconcileInflight(cfg, props, state);
 
     var sent = 0;
     var stale = 0;
@@ -38,7 +111,7 @@ function relayTick() {
     for (var i = 0; i < drafts.length; i++) {
       var decision;
       try {
-        decision = classifyDraft(drafts[i], cfg, props);
+        decision = classifyDraft(drafts[i], cfg, state);
       } catch (e) {
         // GmailApp.getDrafts() returns drafts it cannot then read — a scheduled
         // send, or one in some other state that rejects getMessage() with
@@ -51,9 +124,9 @@ function relayTick() {
       }
 
       if (decision.action === 'send') {
-        if (processDraft(drafts[i], decision, cfg, props)) sent++;
+        if (processDraft(drafts[i], decision, cfg, props, state)) sent++;
       } else if (decision.action === 'fail') {
-        handleFailure(drafts[i], decision, cfg, new Error(decision.reason));
+        handleFailure(drafts[i], decision, cfg, new Error(decision.reason), state);
       } else if (decision.action === 'defer' && decision.stale) {
         stale++;
       }
@@ -67,7 +140,8 @@ function relayTick() {
 
     // Premortem 3: the heartbeat is what proves this ran at all.
     putRelayHeartbeat(cfg, sent, stale);
-    pruneConsumed(props);
+    pruneState(state);
+    saveState(props, state);
   } catch (err) {
     // A configuration or Gmail-level failure would otherwise be silent.
     console.error(err.stack || err.message);
@@ -84,12 +158,12 @@ function relayTick() {
  * token works anywhere text can be typed, including mobile compose where
  * labelling a draft is awkward or unavailable. Either one sends.
  */
-function classifyDraft(draft, cfg, props) {
+function classifyDraft(draft, cfg, state) {
   var id = draft.getId();
 
   // Already handled — or handled and then interrupted. Either way, not ours.
-  if (props.getProperty(PROP_CONSUMED_PREFIX + id)) return { action: 'skip' };
-  if (props.getProperty(PROP_INFLIGHT_PREFIX + id)) return { action: 'skip' };
+  if (state.consumed[id]) return { action: 'skip' };
+  if (state.inflight[id]) return { action: 'skip' };
 
   var message = draft.getMessage();
   var subject = message.getSubject() || '';
@@ -115,17 +189,11 @@ function classifyDraft(draft, cfg, props) {
   // Retrying is therefore an explicit act, and there are two ways to signal it,
   // so that a subject-token workflow is not forced to reach for a label:
   // re-apply the outbox label, or simply edit the draft.
-  var failedRaw = props.getProperty(PROP_FAILED_PREFIX + id);
-  if (failedRaw) {
-    var failed = {};
-    try {
-      failed = JSON.parse(failedRaw);
-    } catch (e) {
-      failed = {};
-    }
+  var failed = state.failed[id];
+  if (failed) {
     var editedSince = failed.draftDate && message.getDate().getTime() > failed.draftDate;
     if (!labelled && !editedSince) return { action: 'skip' };
-    props.deleteProperty(PROP_FAILED_PREFIX + id);
+    delete state.failed[id];
   }
 
   // Premortem 5: never send a draft that is still being typed. This doubles as
@@ -287,8 +355,9 @@ function threadRecipients(thread) {
  * crash mid-send can never cause a resend, and the in-flight record is cleared
  * LAST, so a crash anywhere in between is detectable rather than silent.
  */
-function processDraft(draft, decision, cfg, props) {
+function processDraft(draft, decision, cfg, props, state) {
   var id = draft.getId();
+  var sent = false;
   var messageId = '<' + Utilities.getUuid() + '@' + decision.alias.split('@')[1] + '>';
 
   try {
@@ -317,28 +386,57 @@ function processDraft(draft, decision, cfg, props) {
     }
     if (checked.total === 0) throw new Error('The draft has no recipients.');
 
-    // Point of no return. Consumed first, in-flight second, then transmit.
-    props.setProperty(PROP_CONSUMED_PREFIX + id, String(new Date().getTime()));
-    props.setProperty(
-      PROP_INFLIGHT_PREFIX + id,
-      JSON.stringify({ messageId: messageId, subject: decision.subject, at: new Date().getTime() })
-    );
+    // Point of no return. Consumed first, in-flight second, persisted before
+    // the network call so a crash cannot lose them.
+    var now = new Date().getTime();
+    state.consumed[id] = { at: now };
+    state.inflight[id] = { messageId: messageId, subject: decision.subject, at: now };
+    saveState(props, state);
     if (decision.labelled && decision.thread) removeLabel(decision.thread, LABEL_OUTBOX);
 
     sesSendRaw(cfg, decision.alias, checked.ok, built.transmit);
+    sent = true;
 
     archiveToSent(built.archive, decision.thread);
     draft.deleteDraft();
 
-    // Cleared last: if we died before here, the next tick flags it for review
-    // rather than guessing whether it went out.
-    props.deleteProperty(PROP_INFLIGHT_PREFIX + id);
+    // Both cleared only once the draft is gone, so its id can never come round
+    // again. Cleared last: dying before here leaves the in-flight record, and
+    // the next tick flags it for review rather than guessing.
+    delete state.inflight[id];
+    delete state.consumed[id];
+    saveState(props, state);
     console.log('sent ' + messageId + ' as ' + decision.alias);
     return true;
   } catch (err) {
-    props.deleteProperty(PROP_INFLIGHT_PREFIX + id);
-    props.deleteProperty(PROP_CONSUMED_PREFIX + id);
-    handleFailure(draft, decision, cfg, err);
+    if (sent) {
+      // SES already accepted this. Filing or deleting failed afterwards, so the
+      // draft may still be sitting there — but clearing `consumed` would make
+      // the next run send it a second time. Keep the marker, keep the draft,
+      // and ask for a human. Premortem item 1: never risk a duplicate.
+      delete state.inflight[id];
+      saveState(props, state);
+      try {
+        if (decision.thread) addLabel(decision.thread, LABEL_REVIEW);
+      } catch (e) {
+        // best effort
+      }
+      tryAlert(
+        'Relay sent but could not finish: ' + (decision.subject || '(no subject)'),
+        'The message WAS accepted by SES and has gone out.\n\n' +
+          'What failed afterwards was filing the copy in Sent or removing the ' +
+          'draft, so the draft may still be in your Drafts folder. It has NOT ' +
+          'been queued to send again — doing so would deliver a duplicate.\n\n' +
+          'Delete the draft by hand once you have checked.\n\n' +
+          'Error:\n' + (err.message || String(err))
+      );
+      return true;
+    }
+
+    delete state.inflight[id];
+    delete state.consumed[id];
+    saveState(props, state);
+    handleFailure(draft, decision, cfg, err, state);
     return false;
   }
 }
@@ -443,7 +541,7 @@ function archiveToSent(rawMessage, thread) {
  * Premortem 7: failure is always an email. The draft is left intact and
  * editable so nothing is lost — fix it and re-mark it.
  */
-function handleFailure(draft, decision, cfg, err) {
+function handleFailure(draft, decision, cfg, err, state) {
   var subject = decision.subject || '(no subject)';
   console.error('relay failed for "' + subject + '": ' + (err.stack || err.message));
 
@@ -458,10 +556,8 @@ function handleFailure(draft, decision, cfg, err) {
     } catch (e) {
       // Unreadable draft; the label remains the way to retry.
     }
-    PropertiesService.getScriptProperties().setProperty(
-      PROP_FAILED_PREFIX + draft.getId(),
-      JSON.stringify({ at: new Date().getTime(), draftDate: draftDate })
-    );
+    state.failed[draft.getId()] = { at: new Date().getTime(), draftDate: draftDate };
+    saveState(PropertiesService.getScriptProperties(), state);
   } catch (e) {
     console.error('could not record failure marker: ' + e.message);
   }
@@ -494,18 +590,10 @@ function handleFailure(draft, decision, cfg, err) {
  * we cannot determine. We never auto-retry it — a duplicate to a client is
  * worse than a send you confirm by hand.
  */
-function reconcileInflight(cfg, props) {
-  var all = props.getProperties();
-  for (var key in all) {
-    if (!all.hasOwnProperty(key) || key.indexOf(PROP_INFLIGHT_PREFIX) !== 0) continue;
-
-    var draftId = key.slice(PROP_INFLIGHT_PREFIX.length);
-    var record = {};
-    try {
-      record = JSON.parse(all[key]);
-    } catch (e) {
-      record = {};
-    }
+function reconcileInflight(cfg, props, state) {
+  for (var draftId in state.inflight) {
+    if (!state.inflight.hasOwnProperty(draftId)) continue;
+    var record = state.inflight[draftId] || {};
 
     try {
       var draft = GmailApp.getDraft(draftId);
@@ -514,7 +602,10 @@ function reconcileInflight(cfg, props) {
       // The draft is gone, which means it almost certainly did send.
     }
 
-    props.deleteProperty(key);
+    // The consumed marker stays: we cannot tell whether SES accepted this, and
+    // making the draft eligible again risks a duplicate.
+    delete state.inflight[draftId];
+    saveState(props, state);
     tryAlert(
       'Relay needs review: ' + (record.subject || '(unknown subject)'),
       'A send was interrupted before it could be confirmed, so it may or may ' +
@@ -538,27 +629,6 @@ function reportStuckDrafts(cfg, count) {
       'Add a "' + LABEL_FROM_PREFIX + '<domain>" label to the draft, or start ' +
       'the subject with ">><domain> ".'
   );
-}
-
-/** Consumed and failed markers only need to outlive a stuck draft. */
-function pruneConsumed(props) {
-  var all = props.getProperties();
-  var cutoff = new Date().getTime() - CONSUMED_TTL_MS;
-  for (var key in all) {
-    if (!all.hasOwnProperty(key)) continue;
-    var isMarker =
-      key.indexOf(PROP_CONSUMED_PREFIX) === 0 || key.indexOf(PROP_FAILED_PREFIX) === 0;
-    if (!isMarker) continue;
-    // Consumed markers hold a bare timestamp; failed markers hold JSON.
-    var at = 0;
-    try {
-      var parsed = JSON.parse(all[key]);
-      at = parsed && parsed.at ? parsed.at : parseInt(all[key], 10);
-    } catch (e) {
-      at = parseInt(all[key], 10);
-    }
-    if (!at || at < cutoff) props.deleteProperty(key);
-  }
 }
 
 // ── Small Gmail helpers ──────────────────────────────────────────────────────
