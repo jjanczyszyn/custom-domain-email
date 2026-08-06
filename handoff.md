@@ -1,33 +1,30 @@
-# Handoff — 2026-08-06 16:54 CEST
+# Handoff — 2026-08-06 20:20 CEST
 
 ## What this is
 
 `custom-domain-email`: receive mail at your own domains in Gmail via SES →
 Lambda → forward, and send as those domains. ~$1/month, all Terraform.
-See `README.md`; relay design in `docs/relay-premortem.md`.
+See `README.md`; relay design and failure analysis in
+`docs/relay-premortem.md`.
 
-**This repo is PUBLIC.** Real domains and addresses belong only in
-`config/domains.yaml` and `.env` (both gitignored). Test fixtures use RFC 2606
-reserved domains. CI blocks AWS keys and tracked private config — but it does
-**not** detect real domain names, so that one is on us.
+**This repo is PUBLIC.** Real domains, addresses, and names belong only in
+`config/domains.yaml`, `.env`, and Apps Script Script Properties — never in
+tracked files. CI blocks AWS keys and tracked private config, but it does
+**not** detect real domain names. Grep the diff before committing.
 
-## Current state
+## Current state — the relay works
 
-**PR #1 open, all CI green**: https://github.com/jjanczyszyn/custom-domain-email/pull/1
-Branch `outbound-relay`, stacked on the three unmerged `oversize-mail-handling`
-commits (never PR'd — worth deciding whether to split).
+Gmail removes "Send as" for third-party addresses in **January 2027**. The
+Apps Script relay in `appsscript/` replaces it and is **live and verified**:
+marked draft → SES → delivered → filed in Sent, threading intact both ways.
 
-Terraform is **already applied** (3 added, 1 changed, 0 destroyed). The
-`multi-domain-email-relay` IAM user exists and its scoping is verified against
-real AWS: sending as a verified domain works; sending as an unowned domain and
-reading the inbound S3 bucket are both denied.
+Verified end to end: send via subject token, send via label, alias inference
+from a thread, Bcc containment (blind recipients delivered, never disclosed),
+reply threading, failure alerts with stack traces, Gmail filter routing.
 
-## Why the relay exists
-
-Gmail removes **"Send as" for third-party addresses in January 2027**, and will
-restrict *new* configurations before then (we are in that window now). Inbound
-forwarding is explicitly unaffected. The relay in `appsscript/` replaces the
-outbound half while keeping composing in Gmail.
+**PR #1** — https://github.com/jjanczyszyn/custom-domain-email/pull/1 — open,
+stacked on three unmerged `oversize-mail-handling` commits that were never
+PR'd. Worth deciding whether to split them.
 
 ## Deploy / ops essentials
 
@@ -36,37 +33,53 @@ outbound half while keeping composing in Gmail.
 ./deploy.sh --cutover    # flips MX to SES
 ```
 
-⚠️ **Always apply with `enable_mx_cutover=true`** once cut over, or the MX
-records get destroyed. `deploy.sh --cutover` does this; a bare
-`terraform apply` does not.
+⚠️ **Always apply with `enable_mx_cutover=true`**, or the MX records are
+destroyed. `deploy.sh --cutover` does this; a bare `terraform apply` does not.
 
 ```bash
-cd lambda && npm test        # 27 tests (needs `npm ci` in lambda/src first)
-cd appsscript && npm test    # 46 tests
+cd lambda && npm test        # 27 tests (run `npm ci` in lambda/src first)
+cd appsscript && npm test    # 77 tests
+cd appsscript && clasp push -f   # deploy the relay
 ```
+
+Alerts from every source (DLQ notifier, canary, relay) share the `[SES alert]`
+subject prefix; one Gmail filter on `subject:"SES alert"` catches them all.
 
 ## Open threads / next steps
 
-1. **Merge PR #1**, deciding whether to split off the stacked commits.
-2. **Install the relay** — `appsscript/README.md` has the steps. Not started;
-   the Apps Script project does not exist yet. Nothing sends through it until
-   `setUp()` runs. Verify with `checkAws()` → `sendTestEmail()` → a real reply.
-3. **Then** `terraform apply -var relay_enabled=true` to arm the watchdog. Doing
-   this before the relay runs just generates false alerts.
-4. **Add remaining Send-As aliases NOW if wanted.** `hello@` is configured for
-   one domain only. Google may block *new* Send-As configurations at any point
-   this quarter; existing ones work until January 2027. Adding them buys a
-   working fallback to compare the relay against while both paths exist.
-5. **Decide on git history.** A real domain and personal name are still in
-   history from `c87e925`. Scrubbing needs a force-push, which rewrites hashes
-   for anyone who cloned or forked. Working tree is clean either way.
-6. **SPF, separate PR.** `toward.love` publishes SPF listing Maileroo and Google
-   but not `amazonses.com`; the other three publish no SPF. All four pass DMARC
-   via DKIM alignment, so mail is deliverable — but on one mechanism with no
-   margin. `toward.love` has a live Maileroo sender, so change it on its own.
+1. **Merge PR #1**, deciding whether to split the stacked commits.
+2. **Arm the relay watchdog** once you trust it:
+   `terraform apply -var relay_enabled=true -var enable_mx_cutover=true`.
+   Until then nothing tells you if the Apps Script trigger dies.
+3. **Untested: attachments.** Send a reply with a photo and confirm it arrives
+   intact and appears in the Sent copy. SES caps a send at 10 MB.
+4. **Stale test drafts** from the debugging session may still be in Drafts,
+   carrying failure markers. Delete them, or edit one to retry it.
+5. **Git history still contains a real domain and name** from the test fixture
+   in `c87e925`. Scrubbing needs a force-push, which rewrites hashes for anyone
+   who cloned or forked. Zero forks as of today, so the cost is unusually low.
+6. **SPF, separate PR.** One domain publishes SPF without `include:amazonses.com`
+   and three publish none, so outbound rests entirely on DKIM alignment, which
+   passes on all four. That domain has a live third-party sender, so change it
+   on its own and test independently.
 
 ## Time-sensitive
 
-- **January 2027** — Send-As dies. Relay must be working before then.
-- **Now–Q4 2026** — window where both paths work. The only time the relay can be
-  A/B'd against a known-good reference.
+- **January 2027** — Gmail "Send as" for third-party addresses is removed.
+  The relay must be working before then. It is; keep it that way.
+- **Now–Q4 2026** — the window where both paths work, and the only time the
+  relay can be compared against a known-good reference.
+
+## Hard-won gotchas (all in docs/relay-premortem.md)
+
+- Apps Script advanced services return `bytes` fields as **Byte[]**, already
+  decoded — not the base64 string the REST API documents.
+- `clasp create-script` **overwrites `src/appsscript.json`**, dropping the
+  advanced-service and scope declarations. Restore from git before pushing.
+- Changing the manifest requires **re-authorisation**: run any function from
+  the editor, or the installed trigger keeps failing under the old grant.
+- Gmail's stored draft closes `</body></html>` **before** the quoted reply.
+  Gmail's own sender repairs this; the relay must too, or recipients see an
+  apparently empty message.
+- Gmail does not always thread a reply with its parent, and may record no
+  `In-Reply-To` at all — hence four layers of alias inference.
