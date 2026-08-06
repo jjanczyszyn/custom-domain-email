@@ -326,6 +326,28 @@ that were already proven correct. The moment the header was verified right in
 Node, the only unexamined step left was the API call, and that is where the
 next probe should have gone.
 
+**17. Every successful send reported itself as possibly-unsent.**
+
+Each send emailed "a send was interrupted before it could be confirmed, so it
+may or may not have gone out" — the item 1 machinery firing on messages that had
+gone out perfectly. Alarming, unactionable, and on every single send, which is
+how a real warning gets trained into noise.
+
+A send persists an in-flight entry *before* the network call so a crash is
+detectable, then removes it after. The tick therefore ends with state identical
+to how it started. An optimisation skipped the final write when the end state
+matched the state at load — but the property still held the intermediate write,
+so the entry was stranded and the next run reported it as unconfirmed.
+
+**Mitigation:** the dirty check moved into `saveState()`, which compares against
+what it last actually *wrote* rather than what was loaded. `state.test.mjs`
+pins it, and reintroducing the old comparison fails that test.
+
+**The lesson worth keeping:** an optimisation that skips a write has to compare
+against the last write, not the last read. The two diverge exactly when
+something wrote in between — which is the case the optimisation is most likely
+to be reasoning about incorrectly.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The
