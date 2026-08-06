@@ -52,6 +52,8 @@ function relayTick() {
 
       if (decision.action === 'send') {
         if (processDraft(drafts[i], decision, cfg, props)) sent++;
+      } else if (decision.action === 'fail') {
+        handleFailure(drafts[i], decision, cfg, new Error(decision.reason));
       } else if (decision.action === 'defer' && decision.stale) {
         stale++;
       }
@@ -108,10 +110,21 @@ function classifyDraft(draft, cfg, props) {
 
   // A draft that already failed is not retried on its own. Without this, a
   // permanent failure (bad recipient, oversize) retries every single minute and
-  // emails on each attempt — three alerts in ninety seconds, forever. Retrying
-  // is an explicit act: re-apply the outbox label, which clears the marker.
-  if (props.getProperty(PROP_FAILED_PREFIX + id)) {
-    if (!labelled) return { action: 'skip' };
+  // emails on each attempt — three alerts in ninety seconds, forever.
+  //
+  // Retrying is therefore an explicit act, and there are two ways to signal it,
+  // so that a subject-token workflow is not forced to reach for a label:
+  // re-apply the outbox label, or simply edit the draft.
+  var failedRaw = props.getProperty(PROP_FAILED_PREFIX + id);
+  if (failedRaw) {
+    var failed = {};
+    try {
+      failed = JSON.parse(failedRaw);
+    } catch (e) {
+      failed = {};
+    }
+    var editedSince = failed.draftDate && message.getDate().getTime() > failed.draftDate;
+    if (!labelled && !editedSince) return { action: 'skip' };
     props.deleteProperty(PROP_FAILED_PREFIX + id);
   }
 
@@ -126,13 +139,21 @@ function classifyDraft(draft, cfg, props) {
   var alias = token.alias || aliasFromLabels(labelNames, cfg);
   if (!alias && thread) alias = inferAlias(threadRecipients(thread), cfg.domains, cfg.defaultLocalpart);
 
+  // A draft that names no resolvable domain will never resolve one by itself —
+  // waiting is pointless and, worse, silent. Treat it as a failure now, so you
+  // get told once and immediately rather than discovering nothing sent.
   if (!alias) {
     return {
-      action: 'defer',
-      stale: ageMs > cfg.staleMinutes * 60 * 1000,
+      action: 'fail',
+      subject: token.marked ? token.subject : subject,
+      thread: thread,
       reason:
-        'Could not tell which domain to send as. Add a "' + LABEL_FROM_PREFIX +
-        '<domain>" label, or start the subject with ">><domain> ".',
+        'Could not tell which domain to send as. This is a new message, or a ' +
+        'reply in a thread with no address on your domains, so there is ' +
+        'nothing to infer from.\n\n' +
+        'Name the domain in the subject — ">>' + (cfg.domains[0] || 'yourdomain') +
+        ' Your subject" — or add a "' + LABEL_FROM_PREFIX + '<domain>" label. ' +
+        'Editing the draft is enough to make the relay try again.',
     };
   }
 
@@ -353,11 +374,18 @@ function handleFailure(draft, decision, cfg, err) {
 
   // Stop the automatic retry loop. The marker is what actually prevents it —
   // removing the label alone would not, since a subject-token draft carries no
-  // label to remove.
+  // label to remove. Recording the draft's own timestamp lets a later edit
+  // count as "try again", which is the only retry gesture available on mobile.
   try {
+    var draftDate = 0;
+    try {
+      draftDate = draft.getMessage().getDate().getTime();
+    } catch (e) {
+      // Unreadable draft; the label remains the way to retry.
+    }
     PropertiesService.getScriptProperties().setProperty(
       PROP_FAILED_PREFIX + draft.getId(),
-      String(new Date().getTime())
+      JSON.stringify({ at: new Date().getTime(), draftDate: draftDate })
     );
   } catch (e) {
     console.error('could not record failure marker: ' + e.message);
@@ -446,7 +474,14 @@ function pruneConsumed(props) {
     var isMarker =
       key.indexOf(PROP_CONSUMED_PREFIX) === 0 || key.indexOf(PROP_FAILED_PREFIX) === 0;
     if (!isMarker) continue;
-    var at = parseInt(all[key], 10);
+    // Consumed markers hold a bare timestamp; failed markers hold JSON.
+    var at = 0;
+    try {
+      var parsed = JSON.parse(all[key]);
+      at = parsed && parsed.at ? parsed.at : parseInt(all[key], 10);
+    } catch (e) {
+      at = parseInt(all[key], 10);
+    }
     if (!at || at < cutoff) props.deleteProperty(key);
   }
 }
