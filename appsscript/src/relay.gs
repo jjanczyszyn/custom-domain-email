@@ -12,6 +12,31 @@
  * Each step closes a numbered item in docs/relay-premortem.md, named inline.
  */
 
+/**
+ * How the per-tick draft scan is bounded. See premortem item 18 — every one of
+ * these exists to keep a once-a-minute trigger inside Gmail's 20,000-call day.
+ */
+
+// Drafts touched inside this window are the ones that could have just gained a
+// subject token. Gmail's granularity here is a day, which is the smallest this
+// can usefully be.
+var RECENT_DRAFT_WINDOW = 'newer_than:1d';
+
+// How often an unchanged draft's subject is re-read anyway. Gmail replaces a
+// draft's message id on every edit, so a change is normally noticed for free;
+// this is the backstop for a marking that somehow leaves the id alone, and
+// bounds that case to ten minutes rather than an hour.
+var SUBJECT_RECHECK_MS = 10 * 60 * 1000;
+
+// How often every draft in the mailbox is examined regardless. The narrow
+// queries are an optimisation, and this is what makes them safe to be wrong:
+// anything they miss still goes out, an hour late rather than never.
+var FULL_SWEEP_MS = 60 * 60 * 1000;
+
+// Enough to cover any plausible number of genuinely pending drafts without
+// letting one tick walk an unbounded list.
+var SCAN_LIMIT = 50;
+
 /** Trigger entry point. */
 function relayTick() {
   // Premortem 6: overlapping runs would double-send. A second run exits rather
@@ -22,19 +47,26 @@ function relayTick() {
     return;
   }
 
-  try {
-    var props = PropertiesService.getScriptProperties();
+  // Declared out here so the failure path can see them, but assigned INSIDE the
+  // try: everything that can throw belongs under the catch, or the failure is
+  // silent. They stay null until genuinely loaded, because a null state must
+  // never be mistaken for an empty one — saveState would then write empty
+  // buckets over the consumed markers, and consumed is what stops a resend.
+  var props = null;
+  var state = null;
 
-    // One remote read serves both configuration and state.
-    var snapshot = props.getProperties();
+  try {
+    props = PropertiesService.getScriptProperties();
+    var snapshot = props.getProperties(); // one remote read serves config and state
+    state = loadState(snapshot);
     var cfg = getConfig(snapshot);
-    var state = loadState(snapshot);
 
     reconcileInflight(props, state);
 
     var sent = 0;
     var unreadable = 0;
-    var drafts = GmailApp.getDrafts();
+    var scan = collectDrafts(cfg, state, new Date().getTime());
+    var drafts = scan.drafts;
 
     for (var i = 0; i < drafts.length; i++) {
       var decision;
@@ -61,6 +93,7 @@ function relayTick() {
     if (unreadable > 0) {
       console.log('skipped ' + unreadable + ' unreadable draft(s) of ' + drafts.length);
     }
+    console.log(scan.mode + ' scan examined ' + drafts.length + ' draft(s), sent ' + sent);
 
     // Premortem 3: the heartbeat is what proves this ran at all. A watchdog
     // outside Apps Script reads it, because one inside cannot report its death.
@@ -73,12 +106,100 @@ function relayTick() {
     // the intermediate write and needs correcting.
     saveState(props, state);
   } catch (err) {
-    // A configuration or Gmail-level failure would otherwise be silent.
+    // A configuration or Gmail-level failure would otherwise be silent. It is
+    // also, by nature, the kind of failure that repeats on every tick — so this
+    // alert is throttled. Unthrottled it would send the same mail 1,440 times a
+    // day, which both buries the mailbox and burns the 100-recipients-a-day
+    // sending quota that the per-draft alerts actually need.
+    // reportRunFailed persists its own throttle marker, and tolerates a null
+    // state by alerting without throttling — which is the right way round: an
+    // unthrottled alert is noisy, a missing one is invisible.
     console.error(errorText(err, true));
-    tryAlert('Relay run failed', errorText(err, true));
+    reportRunFailed(err, state, props);
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * The drafts this tick will examine.
+ *
+ * Premortem 18: the obvious implementation — walk every draft, classify each —
+ * costs a Gmail call or three per draft per minute, and a mailbox with a few
+ * dozen abandoned drafts exhausts the daily quota before lunch. It did.
+ *
+ * So most ticks ask two narrow questions instead, neither of which scales with
+ * the mailbox: which drafts carry the Outbox label, and which were touched
+ * recently enough to have just gained a subject token. Once an hour the old
+ * exhaustive walk still runs, so the narrow queries are an optimisation whose
+ * failure mode is lateness rather than silence.
+ */
+function collectDrafts(cfg, state, now) {
+  if (dueAgain(state, 'sweeps', 'full', FULL_SWEEP_MS, now)) {
+    return { mode: 'full', drafts: GmailApp.getDrafts() };
+  }
+
+  var ids = selectMarkedDrafts(
+    labelledDrafts(SCAN_LIMIT),
+    listDrafts(RECENT_DRAFT_WINDOW, SCAN_LIMIT),
+    state,
+    cfg,
+    now,
+    draftSubjectByMessageId
+  );
+
+  var drafts = [];
+  for (var i = 0; i < ids.length; i++) {
+    var draft = draftById(ids[i]);
+    if (draft) drafts.push(draft);
+  }
+  return { mode: 'targeted', drafts: drafts };
+}
+
+/**
+ * Decide which of the candidate drafts are worth a full classification.
+ *
+ * A labelled draft is marked by definition and needs no further reading. A
+ * recently-touched one might have gained a subject token, so its subject is
+ * read — but only when the draft has actually changed since we last looked,
+ * which Gmail reveals for free by replacing the message id on every edit.
+ *
+ * `readSubject` is injected so this stays testable without Gmail, and returns
+ * null for a draft it cannot read.
+ */
+function selectMarkedDrafts(labelled, recent, state, cfg, now, readSubject) {
+  var picked = {};
+  var i;
+  for (i = 0; i < labelled.length; i++) picked[labelled[i].id] = true;
+
+  for (i = 0; i < recent.length; i++) {
+    var draft = recent[i];
+    if (picked[draft.id]) continue;
+
+    // Already handed to SES: no reading of any kind can make it sendable again,
+    // and that is the whole point of the consumed marker. `failed` is
+    // deliberately NOT skipped — editing a failed draft is one of the two ways
+    // to retry it, and noticing the edit is exactly what this loop does.
+    if (state.consumed[draft.id] || state.inflight[draft.id]) continue;
+
+    var memo = state.seen[draft.id];
+    var unchanged = memo && memo.messageId === draft.messageId;
+    var checkedRecently = memo && memo.at && now - memo.at < SUBJECT_RECHECK_MS;
+    if (unchanged && checkedRecently) continue;
+
+    var subject = readSubject(draft.messageId);
+    state.seen[draft.id] = { messageId: draft.messageId, at: now };
+    if (subject === null) continue;
+
+    var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart, cfg.subjectToken);
+    if (token.marked) picked[draft.id] = true;
+  }
+
+  var ids = [];
+  for (var id in picked) {
+    if (picked.hasOwnProperty(id)) ids.push(id);
+  }
+  return ids;
 }
 
 /**
@@ -241,4 +362,16 @@ function processDraft(draft, decision, cfg, props, state) {
     reportNotSent(draft, decision, err, state, props);
     return false;
   }
+}
+
+// Exported for the Node test harness; ignored by Apps Script, where `module`
+// is undefined and every top-level function is already global.
+if (typeof module !== 'undefined') {
+  module.exports = Object.assign(module.exports || {}, {
+    RECENT_DRAFT_WINDOW: RECENT_DRAFT_WINDOW,
+    SUBJECT_RECHECK_MS: SUBJECT_RECHECK_MS,
+    FULL_SWEEP_MS: FULL_SWEEP_MS,
+    SCAN_LIMIT: SCAN_LIMIT,
+    selectMarkedDrafts: selectMarkedDrafts,
+  });
 }

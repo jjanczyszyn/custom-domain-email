@@ -1,4 +1,4 @@
-# Handoff — 2026-08-06 23:10 CEST
+# Handoff — 2026-08-07 00:05 CEST
 
 ## What this is
 
@@ -13,27 +13,58 @@ against, including the ones found the hard way.
 tracked files. CI blocks AWS keys and tracked private config, but it does
 **not** detect real domain names. Grep the diff before committing.
 
-## State: done and running
+## State: relay running, fix deployed, PR #3 open and unmerged
 
-Gmail removes "Send as" for third-party addresses in **January 2027**. The Apps
-Script relay in `appsscript/` replaces it. **PR #1 is merged to `main`.**
+The relay went live 6 Aug and **exhausted Apps Script's Gmail quota** (20,000
+calls/day) about six hours later. It did not stop dead — it began missing ticks
+as it hit the ceiling, and `GmailApp.getDrafts()` threw on the ones that failed.
+Cause: the scan read *every* draft in the mailbox every minute, ~2.1 Gmail calls
+each, and there were 30 abandoned drafts. Pre-mortem item 18 is the write-up.
 
-Verified against the bytes SES actually transmitted — recovered from the
-inbound S3 copy, not from what the code appeared to produce:
+Fixed on branch `relay-gmail-quota` (**PR #3**), and **already `clasp push`ed —
+the live script is the fixed one.** A targeted scan now costs ~3 calls a tick
+regardless of mailbox size, with a full hourly sweep as the safety net. With the
+drafts cleared that is ~4,000 calls a day against 20,000.
 
-- send via subject token (`>>`) and via the `SES/Outbox` label
-- alias inference from a thread, its parent, and the quoted body
-- Bcc containment: blind recipients delivered, never disclosed
-- reply threading, both directions
-- per-domain sender names on the wire (`From: Vibes Queen <hello@…>`)
-- failure alerts with stack traces, and the Gmail filter that files them
-- IAM scoping: 1 allow, 10 denials, checked against live AWS
+The heartbeat resumed within minutes of the deploy — 14 of the last 20 minutes
+at 22:00 UTC, still recovering because the day's allowance was spent before the
+fix landed. The quota window rolls over ~24h after the day's first call, so
+**around 15:30 UTC on 7 Aug** it should return to a clean 60 ticks an hour.
+
+**PR #3 is not merged: GitHub never created a CI run for the branch** (their
+queue, not our config — the workflow has no path filters). Verified locally
+instead: 118 Apps Script + 27 Lambda tests green, and the diff grepped for real
+domains. Merge once CI drains, or after re-checking locally.
+
+## First thing to do next session
+
+1. Check the heartbeat (command below). It should be ~60/hour.
+2. Check the Apps Script execution log: `targeted scan examined 0 draft(s)` most
+   minutes, `full scan examined N` once an hour.
+3. **Send one real message through the relay.** The fix has proved it *runs*;
+   it has not yet proved it *sends*. Nothing else matters until that is done.
+
+```bash
+aws cloudwatch get-metric-statistics --namespace EmailForwarder \
+  --metric-name RelayHeartbeat --period 3600 --statistics Sum --region us-east-1 \
+  --start-time "$(date -u -v-30H '+%Y-%m-%dT%H:%M:%SZ')" \
+  --end-time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+```
+
+This metric is the first thing to look at whenever outbound seems wrong. It is
+the only view of the relay from outside Google.
+
+## Verified working (against the bytes SES actually transmitted)
+
+Recovered from the inbound S3 copy, not from what the code appeared to produce:
+send via subject token (`>>`) and via the `SES/Outbox` label; alias inference
+from a thread, its parent, and the quoted body; Bcc containment; reply threading
+both directions; per-domain sender names on the wire; failure alerts with stack
+traces; IAM scoping (1 allow, 10 denials, checked against live AWS).
 
 Watchdog **armed** — `TF_VAR_relay_enabled=true` lives in `.env`, so a later
-`./deploy.sh` cannot silently disarm it. The canary emails if the relay goes
-quiet for an hour; confirmed by invoking it and seeing no false alarm.
-
-Test mail and drafts from the build session have been cleared.
+`./deploy.sh` cannot silently disarm it. The canary runs hourly and emails only
+on total silence, so it cannot itself become a source of noise.
 
 ## Deploy / ops
 
@@ -47,12 +78,21 @@ destroyed. `deploy.sh --cutover` does this; a bare `terraform apply` does not.
 
 ```bash
 cd lambda && npm test            # 27 tests (run `npm ci` in lambda/src first)
-cd appsscript && npm test        # 94 tests
+cd appsscript && npm test        # 118 tests
 cd appsscript && clasp push -f   # deploy the relay
 ```
 
 Every alert shares the `[SES alert]` subject prefix; one Gmail filter on
 `subject:"SES alert"` catches all of them, from all three runtimes.
+
+Alert volume is capped in `notify.gs`: one per fault per 4h
+(`ALERT_THROTTLE_MS`), and a flat ceiling of 4/hour and 20/day across every call
+site (`ALERT_BUDGET_WINDOWS`). Raise them if it ever feels too quiet — the cap
+reports how many it suppressed in the next alert that gets through.
+
+Google's *own* trigger-failure mail is separate and not throttleable from code.
+Apps Script → Triggers → `relayTick` → **Failure notification settings** →
+*daily* rather than *immediately*.
 
 Two functions to run from the Apps Script editor when something looks wrong:
 `showConfig()` (what the relay actually parsed) and `inspectDrafts()` (what
@@ -60,12 +100,9 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
 
 ## Open threads
 
-1. **Untested: attachments.** Send a reply with a photo; confirm it arrives
+1. **Merge PR #3** once CI reports (see above).
+2. **Untested: attachments.** Send a reply with a photo; confirm it arrives
    intact and appears in the Sent copy. SES caps a send at 10 MB.
-2. **CI never ran on the final commits** — GitHub's runners were backlogged for
-   hours. Everything was verified locally instead (both suites, terraform fmt
-   and validate, the same secret guards CI runs) and that is recorded in the
-   merge commit. Worth a glance at the Actions tab once it drains.
 3. **Git history still holds a real domain and name** from the test fixture in
    `c87e925`. Scrubbing needs a force-push, which rewrites hashes for anyone who
    cloned or forked. Zero forks, so the cost is unusually low right now.
@@ -84,6 +121,13 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
 
 ## Gotchas that cost real time (all written up in the pre-mortem)
 
+- **A per-minute trigger gets ~13 Gmail calls a tick, and no more.** 20,000/day
+  ÷ 1,440 ticks. Anything the scan does per draft is multiplied by the size of
+  the mailbox *and* by 1,440 — cost it per day before adding it. Correct and
+  affordable are separate reviews; only the first one was done.
+- **An alert on a repeating condition needs a throttle**, or the first outage
+  takes the alarm system down with it — the run-failure mail fired every tick
+  and would have spent the separate 100-recipients-a-day quota.
 - **SES's `FromEmailAddress` overrides the raw message's `From` header.** Pass
   the fully formatted value or the display name is silently discarded.
 - **An optimisation that skips a write must compare against the last write, not
@@ -92,6 +136,9 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
 - **Only `STATE_BUCKETS` survive a state reload.** Any other key set on the
   state object is dropped silently, so a "run once" flag stored there fires
   every minute forever.
+- **Local `main` has no upstream tracking**, so `git pull` on it silently does
+  nothing and a branch cut from it starts three commits stale. Branch from
+  `origin/main`, not `main`.
 - Apps Script advanced services return `bytes` fields as **Byte[]**, already
   decoded — not the base64 string the REST API documents.
 - `clasp create-script` **overwrites `src/appsscript.json`**, dropping the
@@ -108,10 +155,14 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
 
 ## Debugging posture
 
-Four separate bugs each cost multiple rounds because the failure was theorised
+Five separate bugs each cost multiple rounds because the failure was theorised
 about rather than instrumented, and every one collapsed within minutes of making
-the code report what it actually saw. Two of them lived in a *seam* — the SES
-call, and the state write — while every individual component verified correct.
+the code report what it actually saw. Two lived in a *seam* — the SES call, and
+the state write — while every individual component verified correct.
 
-**When each component checks out but the output is wrong, probe the seam, and
-probe it before forming a third theory.**
+The quota failure was different and worth naming separately: every component was
+correct, and the *cost* was the defect. It was diagnosed in one pass by asking
+the heartbeat metric how many ticks had run before it died, then dividing.
+
+**When each component checks out but the output is wrong, probe the seam. When
+nothing is wrong but it stopped anyway, count something.**

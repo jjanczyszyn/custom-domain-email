@@ -96,6 +96,116 @@ function describeRawPayload(raw) {
   );
 }
 
+// ── Cheap draft discovery ────────────────────────────────────────────────────
+//
+// Premortem 18: GmailApp.getDrafts() hands back every draft in the mailbox, and
+// classifying one costs several Gmail calls. That is a per-tick bill of
+// O(drafts) against a quota of 20,000 calls per day — with thirty abandoned
+// drafts sitting in the mailbox and a trigger every minute, the relay exhausted
+// a full day's quota in under six hours and then died at getDrafts() on every
+// tick with "Service invoked too many times for one day: gmail".
+//
+// The functions below let a tick ask Gmail narrow questions instead: which
+// drafts are labelled, which were touched recently, and what is this one's
+// subject. Each answers in a fixed number of calls no matter how many drafts
+// the mailbox holds.
+
+/**
+ * Drafts matching a Gmail search — one call, however many drafts come back.
+ *
+ * The advanced service rather than GmailApp.search(), because this returns
+ * plain ids without materialising a GmailThread per hit. The entire point is to
+ * spend one Gmail call rather than one per draft.
+ *
+ * Each entry carries the ids the caller needs to avoid further calls:
+ *   messageId — Gmail replaces a draft's underlying message on every edit, so
+ *               this doubles as a free change-detector.
+ *   threadId  — lets a draft be matched to a labelled thread without asking
+ *               the draft which thread it is on.
+ */
+function listDrafts(query, limit) {
+  var params = { maxResults: limit || 50 };
+  if (query) params.q = query;
+
+  var res = Gmail.Users.Drafts.list('me', params);
+  var found = (res && res.drafts) || [];
+  var out = [];
+  for (var i = 0; i < found.length; i++) {
+    var message = found[i] && found[i].message;
+    if (found[i] && found[i].id) {
+      out.push({
+        id: found[i].id,
+        messageId: (message && message.id) || '',
+        threadId: (message && message.threadId) || '',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * The drafts whose thread carries the Outbox label.
+ *
+ * Asks the label which threads it holds and then matches those against the
+ * draft list, rather than trusting a `label:` search query to treat a draft the
+ * way the Gmail UI does. That is the same thread-level view classifyDraft()
+ * takes — read from the other end — so the two cannot disagree about what
+ * "labelled" means.
+ *
+ * Costs two calls when the label is unused, which is the normal case: an
+ * unused label holds no threads, and the draft list is never fetched.
+ */
+function labelledDrafts(limit) {
+  var label = GmailApp.getUserLabelByName(LABEL_OUTBOX);
+  if (!label) return [];
+
+  var threads = label.getThreads(0, limit || 50);
+  if (!threads.length) return [];
+
+  var wanted = {};
+  for (var i = 0; i < threads.length; i++) wanted[threads[i].getId()] = true;
+
+  var out = [];
+  var all = listDrafts('', limit);
+  for (var j = 0; j < all.length; j++) {
+    if (wanted[all[j].threadId]) out.push(all[j]);
+  }
+  return out;
+}
+
+/**
+ * One draft's subject, fetched as metadata so Gmail never sends the body.
+ *
+ * Returns null when the draft cannot be read, which callers treat as "not
+ * marked" — the same posture as the unreadable-draft skip in relayTick, and for
+ * the same reason: one odd draft must not stop all outbound mail.
+ */
+function draftSubjectByMessageId(messageId) {
+  try {
+    var res = Gmail.Users.Messages.get('me', messageId, {
+      format: 'metadata',
+      metadataHeaders: ['Subject'],
+    });
+    var headers = (res && res.payload && res.payload.headers) || [];
+    for (var i = 0; i < headers.length; i++) {
+      if (String(headers[i].name).toLowerCase() === 'subject') return headers[i].value || '';
+    }
+    return '';
+  } catch (e) {
+    console.warn('could not read subject for message ' + messageId + ': ' + errorText(e));
+    return null;
+  }
+}
+
+/** The GmailApp draft for an id, or null if it has since gone. */
+function draftById(id) {
+  try {
+    return GmailApp.getDraft(id) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * File the sent copy in Gmail.
  *
