@@ -27,7 +27,8 @@ function setUp() {
       '  Region:       ' + cfg.region + '\n' +
       '  Alerts to:    ' + cfg.alertEmail + '\n\n' +
       'Mark a draft with the "' + LABEL_OUTBOX + '" label or a "' + cfg.subjectToken + '" subject ' +
-      'prefix to send it. Run checkAws() to confirm AWS credentials work.'
+      'prefix to send it.\n\n' +
+      'Next: showConfig() to check what was parsed, then checkAws().'
   );
 }
 
@@ -37,6 +38,41 @@ function removeTriggers() {
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'relayTick') ScriptApp.deleteTrigger(triggers[i]);
   }
+}
+
+/**
+ * Print the configuration the relay actually parsed, with secrets redacted.
+ *
+ * A misspelled property key, or a value in the wrong shape, otherwise fails
+ * silently — the relay simply carries on with the default and nothing says why.
+ * This shows the parsed result rather than the raw strings, so the answer to
+ * "did my setting take effect?" is visible instead of inferred.
+ */
+function showConfig() {
+  var cfg = getConfig();
+
+  var senders = [];
+  for (var i = 0; i < cfg.domains.length; i++) {
+    var address = cfg.defaultLocalpart + '@' + cfg.domains[i];
+    var name = displayNameFor(address, cfg.domainNames);
+    senders.push(
+      '    ' + address + '  ->  ' +
+      (name ? '"' + name + '" <' + address + '>' : '(no name — set DOMAIN_NAMES)')
+    );
+  }
+
+  console.log(
+    'Relay configuration\n' +
+      '  Region:        ' + cfg.region + '\n' +
+      '  Access key:    ' + (cfg.accessKey ? cfg.accessKey.slice(0, 8) + '…' : '(missing)') + '\n' +
+      '  Secret key:    ' + (cfg.secretKey ? '(set, ' + cfg.secretKey.length + ' chars)' : '(missing)') + '\n' +
+      '  Alerts to:     ' + cfg.alertEmail + '\n' +
+      '  Namespace:     ' + cfg.metricNamespace + '\n' +
+      '  Subject token: ' + (cfg.subjectToken || '(disabled)') + '\n' +
+      '  Settle:        ' + cfg.settleSeconds + 's\n' +
+      '  Domains:       ' + cfg.domains.length + '\n' +
+      'How each domain will appear to recipients:\n' + senders.join('\n')
+  );
 }
 
 /**
