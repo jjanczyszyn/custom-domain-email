@@ -150,6 +150,25 @@ to poke the pipeline for a fix:
   canary emails you directly. This is the one failure the DLQ notifier can't
   catch, because nothing reaches the forwarder to dead-letter.
 
+### Filing the alerts in Gmail
+
+Every alert comes from one of two senders, so a single Gmail filter catches all
+of them. Search options → **Has the words**:
+
+```
+from:no-reply@<first-domain> OR (from:me subject:relay)
+```
+
+The first clause covers the AWS-side alerts (DLQ notifier and canary watchdog,
+both sent from `no-reply@` on the first configured domain). The second covers
+the relay's own alerts, which are sent through Apps Script's `MailApp` — from
+your own address, and prefixed `[relay]`. Two channels on purpose: the relay
+cannot rely on SES to tell you SES is broken.
+
+Apply a label (e.g. `SES/Alerts`) and tick **Never send it to Spam** — alerts
+arrive from your own domain, which is exactly the shape spam filters distrust.
+Do *not* have them skip the inbox; the whole point is that you see them.
+
 ### Oversize mail
 
 SES *receives* up to 40 MB but `SendRawEmail` only *sends* up to 10 MB, so a
