@@ -388,10 +388,17 @@ of how many drafts it holds, and the thirty abandoned ones cost nothing at all.
 Three layers keep that safe to be wrong. The message-id memo is re-checked
 every ten minutes anyway, in case a marking ever leaves the id alone. The full
 exhaustive walk still runs once an hour, so anything the narrow queries miss
-goes out late rather than never. And run-level alerts are throttled to one per
-fault every four hours, so a stuck relay reports itself without also destroying
-its own ability to report anything else. `scan.test.mjs` counts the reads the
-scan performs, because here the cost *is* the behaviour under test.
+goes out late rather than never. `scan.test.mjs` counts the reads the scan
+performs, because here the cost *is* the behaviour under test.
+
+The alerting got two guards, because they fail separately. Run-level failures
+are throttled to one per fault every four hours, which stops the *same* failure
+repeating. Underneath that, `tryAlert()` enforces a flat ceiling — four alerts
+an hour, twenty a day, across every call site — which bounds everything else:
+any mix of faults, and any future code that decides to email. The ceiling keeps
+a count of what it held back and says so in the next alert that gets through,
+because a cap that silently drops mail is worse than no cap at all: it makes
+"nothing is wrong" and "everything is wrong" look identical from the inbox.
 
 **The lesson worth keeping:** a loop that is correct can still be unaffordable,
 and quota is consumed by the work you skip as well as the work you do. Anything

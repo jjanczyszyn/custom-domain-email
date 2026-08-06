@@ -26,12 +26,91 @@ var RETRY_INSTRUCTIONS =
  */
 function tryAlert(subject, body) {
   try {
-    var to = PropertiesService.getScriptProperties().getProperty(PROP_ALERT_EMAIL);
+    var props = PropertiesService.getScriptProperties();
+    var to = props.getProperty(PROP_ALERT_EMAIL);
+    if (!to) return;
+
+    var budget = claimAlertBudget(props);
+    if (!budget.allowed) {
+      console.warn('alert suppressed by the volume cap: ' + subject);
+      return;
+    }
+
     // Call sites already name the relay, so the prefix is all that is added.
-    if (to) MailApp.sendEmail(to, ALERT_SUBJECT_PREFIX + ' ' + subject, body);
+    MailApp.sendEmail(
+      to,
+      ALERT_SUBJECT_PREFIX + ' ' + subject,
+      body + (budget.suppressed
+        ? '\n\n---\n' + budget.suppressed + ' further alert(s) were suppressed by the ' +
+          'volume cap since the last one got through. Check the Apps Script ' +
+          'execution log for what they were.'
+        : '')
+    );
   } catch (e) {
     console.error('could not send alert: ' + errorText(e));
   }
+}
+
+/**
+ * A hard ceiling on alert mail, independent of every other guard.
+ *
+ * The per-fault throttle below stops the *same* failure repeating. This stops
+ * everything else: any number of call sites, any mix of faults, any future code
+ * that decides to email. Alerts are the one thing that must never become the
+ * problem — Apps Script allows 100 recipients a day, so a storm both buries the
+ * mailbox and destroys the ability to report the next, different failure.
+ *
+ * Kept in its own property rather than the state bundle deliberately: it has to
+ * work on the paths where the bundle could not be read, which are exactly the
+ * paths most likely to be failing repeatedly.
+ */
+var PROP_ALERT_BUDGET = '_relayAlertBudget';
+var ALERT_BUDGET_WINDOWS = [
+  { key: 'hour', ms: 60 * 60 * 1000, max: 4 },
+  { key: 'day', ms: 24 * 60 * 60 * 1000, max: 20 },
+];
+
+function claimAlertBudget(props) {
+  var now = new Date().getTime();
+  var stored = {};
+  try {
+    var raw = props.getProperty(PROP_ALERT_BUDGET);
+    if (raw) stored = JSON.parse(raw) || {};
+  } catch (e) {
+    // An unreadable budget must never be the reason an alert is not sent.
+    stored = {};
+  }
+
+  var i;
+  var allowed = true;
+  for (i = 0; i < ALERT_BUDGET_WINDOWS.length; i++) {
+    var span = ALERT_BUDGET_WINDOWS[i];
+    var seen = stored[span.key];
+    if (!seen || typeof seen.start !== 'number' || now - seen.start >= span.ms) {
+      seen = { start: now, sent: 0 };
+      stored[span.key] = seen;
+    }
+    if (seen.sent >= span.max) allowed = false;
+  }
+
+  // Count what was held back, so the next alert that does get through says so.
+  // A cap that silently drops mail is worse than no cap: it turns "nothing is
+  // wrong" and "everything is wrong" into the same empty inbox.
+  var suppressed = stored.suppressed || 0;
+  if (allowed) {
+    for (i = 0; i < ALERT_BUDGET_WINDOWS.length; i++) stored[ALERT_BUDGET_WINDOWS[i].key].sent++;
+    stored.suppressed = 0;
+  } else {
+    stored.suppressed = suppressed + 1;
+    suppressed = 0;
+  }
+
+  try {
+    props.setProperty(PROP_ALERT_BUDGET, JSON.stringify(stored));
+  } catch (e) {
+    console.error('could not record the alert budget: ' + errorText(e));
+  }
+  return { allowed: allowed, suppressed: suppressed };
 }
 
 /**
@@ -60,18 +139,26 @@ function reportRunFailed(err, state, props) {
   var quota = /too many times/i.test(message);
   var key = quota ? 'gmail-quota' : message.slice(0, 120);
 
+  var due = true;
   if (state && state.notices) {
-    if (!dueAgain(state, 'notices', key, ALERT_THROTTLE_MS, new Date().getTime())) {
-      console.log('alert suppressed; already reported "' + key + '" within the throttle window');
-      return;
-    }
-    // Persist immediately: if this tick dies before its own tidy-up, the marker
-    // must still be there, or the next tick reports the same fault again.
+    due = dueAgain(state, 'notices', key, ALERT_THROTTLE_MS, new Date().getTime());
+
+    // Persist unconditionally, and BEFORE the throttled early return. A failing
+    // tick has usually already recorded something that must outlive it — the
+    // throttle marker itself, and the hourly-sweep marker set at the top of the
+    // run. Returning without this write loses the sweep marker, so every
+    // failing tick would attempt the expensive full scan again: the exact
+    // behaviour that exhausted the quota in the first place.
     try {
       saveState(props, state);
     } catch (e) {
       console.error('could not record the alert marker: ' + errorText(e));
     }
+  }
+
+  if (!due) {
+    console.log('alert suppressed; already reported "' + key + '" within the throttle window');
+    return;
   }
 
   tryAlert(
@@ -203,6 +290,8 @@ if (typeof module !== 'undefined') {
     ALERT_THROTTLE_MS: ALERT_THROTTLE_MS,
     RETRY_INSTRUCTIONS: RETRY_INSTRUCTIONS,
     tryAlert: tryAlert,
+    claimAlertBudget: claimAlertBudget,
+    ALERT_BUDGET_WINDOWS: ALERT_BUDGET_WINDOWS,
     reportRunFailed: reportRunFailed,
     errorText: errorText,
   });

@@ -70,7 +70,10 @@
   Run-level failures recur on every tick by nature, and the handler mailed each
   one — so a single fault also consumed the separate 100-recipients-a-day quota
   that per-draft alerts depend on. Identical run failures are now reported once
-  every four hours.
+  every four hours, and beneath that `tryAlert()` enforces a flat ceiling of
+  four alerts an hour and twenty a day across every call site — so no failure,
+  present or future, can turn the alerting into the problem. The ceiling counts
+  what it suppressed and says so in the next alert that gets through.
 - **Removed a real domain and personal name from `lambda/test/lib.test.mjs`.**
   This repository is public, and the malformed-recipient regression fixture
   added in `c87e925` carried them verbatim. All test fixtures now use
