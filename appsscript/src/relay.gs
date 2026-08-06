@@ -258,10 +258,14 @@ function fetchRawDraft(draftId) {
 
   var raw = res.message.raw;
 
-  // Apps Script's advanced services return protobuf `bytes` fields as Blob
-  // objects, not as the base64 strings the REST API documents. Handing a Blob
-  // to a base64 decoder fails with "Could not decode string", which points
-  // nowhere near the actual cause.
+  // Apps Script's advanced services decode protobuf `bytes` fields for you and
+  // return a Byte[] — NOT the base64 string the REST API documents. So there is
+  // nothing to decode: the array already holds the raw RFC822 message. Passing
+  // it to a base64 decoder yields "Could not decode string", an error that
+  // describes the decoder's disappointment rather than the actual shape.
+  if (Object.prototype.toString.call(raw) === '[object Array]') {
+    return Utilities.newBlob(raw).getDataAsString('UTF-8');
+  }
   if (raw && typeof raw.getDataAsString === 'function') {
     return raw.getDataAsString('UTF-8');
   }
@@ -271,13 +275,39 @@ function fetchRawDraft(draftId) {
 
   // Otherwise it is a base64url string. base64DecodeWebSafe rejects unpadded
   // input, which is what Gmail returns, so fall back to padded standard base64.
-  var bytes;
+  var bytes = null;
+  var attempts = [];
   try {
     bytes = Utilities.base64DecodeWebSafe(String(raw));
   } catch (e) {
-    bytes = Utilities.base64Decode(normalizeBase64(raw));
+    attempts.push('base64DecodeWebSafe: ' + (e.message || e));
   }
-  return Utilities.newBlob(bytes).getDataAsString('UTF-8');
+  if (bytes === null) {
+    try {
+      bytes = Utilities.base64Decode(normalizeBase64(raw));
+    } catch (e) {
+      attempts.push('base64Decode(normalised): ' + (e.message || e));
+    }
+  }
+  if (bytes === null) {
+    // Report what we were actually handed. A bare decoder message names the
+    // symptom and says nothing about the input that caused it.
+    throw new Error(
+      'Could not decode the raw draft. typeof=' + typeof raw +
+      ', constructor=' + (raw && raw.constructor ? raw.constructor.name : 'n/a') +
+      ', length=' + (typeof raw === 'string' ? raw.length : 'n/a') +
+      ', head=' + String(raw).slice(0, 40) +
+      ' | attempts: ' + attempts.join(' ;; ')
+    );
+  }
+
+  try {
+    return Utilities.newBlob(bytes).getDataAsString('UTF-8');
+  } catch (e) {
+    // Not every message body is valid UTF-8; fall back to the platform default
+    // rather than losing the whole send over an encoding guess.
+    return Utilities.newBlob(bytes).getDataAsString();
+  }
 }
 
 /**
@@ -337,6 +367,10 @@ function handleFailure(draft, decision, cfg, err) {
       'Sending as: ' + (decision.alias || 'unresolved') + '\n' +
       'Subject:    ' + subject + '\n\n' +
       'Error:\n' + (err.message || String(err)) + '\n\n' +
+      // The stack names the line. Without it a generic runtime message like
+      // "Could not decode string" identifies the symptom and hides entirely
+      // which call produced it, which costs a round trip per diagnosis.
+      'Where:\n' + (err.stack || '(no stack available)') + '\n\n' +
       'Fix the draft and re-apply the "' + LABEL_OUTBOX + '" label to retry.'
   );
 }

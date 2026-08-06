@@ -236,6 +236,29 @@ is not "skip one" but "process none".
 ones are counted and logged, and the run continues. The relay heartbeat still
 fires, so item 3's watchdog stays meaningful.
 
+**14. A generic runtime error cost three wrong fixes.**
+
+Reading a draft failed with `Could not decode string`. That message names the
+decoder's disappointment and nothing about the input, and three plausible
+theories were shipped against it in turn — unpadded base64, base64url alphabet,
+a Blob payload — each wrong, each costing a full test cycle.
+
+The actual cause: Apps Script's advanced services *decode* protobuf `bytes`
+fields for you and return a `Byte[]`, not the base64 string the REST API
+documents. There was never anything to decode. Every fix was operating on a
+premise that was false from the start.
+
+What ended it was not a better theory but making the failure self-describing:
+the error now reports `typeof`, constructor, length, and the first bytes of what
+it was actually handed, and the alert email carries the stack. The very next
+failure said `constructor=Array` and `head=82,101,99,...` — ASCII for
+`Received: ` — which named the cause outright.
+
+**The lesson worth keeping:** when an error message describes a symptom rather
+than an input, stop theorising and spend the cycle on making the error name its
+input. One diagnostic beats three guesses, and it is cheaper than the first
+guess. `inspectDrafts()` in `setup.gs` exists for the same reason.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The
