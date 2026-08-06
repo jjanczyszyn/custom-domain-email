@@ -51,6 +51,12 @@ function emptyState() {
 /**
  * Read the state bundle from an already-fetched property snapshot, so this
  * costs no additional remote call.
+ *
+ * ⚠️ Only the declared buckets survive a reload. Any other key you set on the
+ * state object persists for the current run and is then silently dropped, so a
+ * "do this once" flag stored there resets on every tick and the thing fires
+ * every minute forever. If you need a new kind of persistent state, add it to
+ * STATE_BUCKETS — do not attach it ad hoc.
  */
 function loadState(snapshot) {
   var state = emptyState();
