@@ -236,6 +236,71 @@ test("inferAlias: no configured domain in the thread means no guess", () => {
   assert.equal(gs.inferAlias(["a@external.com"], DOMAINS, "hello"), null);
 });
 
+// ── Malformed Gmail draft HTML ───────────────────────────────────────────────
+
+// Exactly what Gmail stores for a reply: the document is closed before the
+// quote, leaving it outside <body>. Recipients collapse the whole message.
+const GMAIL_REPLY_HTML =
+  '<html><body><div dir="auto">my new text</div></body></html>' +
+  '<br><div class="gmail_extra"><div>On Thu wrote:<br>' +
+  '<blockquote class="gmail_quote">the original</blockquote></div></div>';
+
+test("fixStrayClosingTags: moves the closing tags after the quote", () => {
+  const fixed = gs.fixStrayClosingTags(GMAIL_REPLY_HTML);
+  assert.ok(fixed.endsWith("</body></html>"), "should close at the very end");
+  assert.equal((fixed.match(/<\/html>/gi) || []).length, 1, "exactly one </html>");
+  assert.equal((fixed.match(/<\/body>/gi) || []).length, 1, "exactly one </body>");
+});
+
+test("fixStrayClosingTags: the quote ends up inside the document", () => {
+  const fixed = gs.fixStrayClosingTags(GMAIL_REPLY_HTML);
+  assert.ok(fixed.indexOf("gmail_quote") < fixed.indexOf("</body>"));
+  assert.ok(fixed.indexOf("my new text") < fixed.indexOf("gmail_quote"));
+});
+
+test("fixStrayClosingTags: no content is added or lost", () => {
+  const fixed = gs.fixStrayClosingTags(GMAIL_REPLY_HTML);
+  for (const fragment of ["my new text", "On Thu wrote:", "the original", 'dir="auto"']) {
+    assert.ok(fixed.includes(fragment), `lost: ${fragment}`);
+  }
+});
+
+test("fixStrayClosingTags: well-formed HTML is left untouched", () => {
+  const ok = "<html><body><div>hi</div></body></html>";
+  assert.equal(gs.fixStrayClosingTags(ok), ok);
+});
+
+test("fixStrayClosingTags: plain text without tags is untouched", () => {
+  assert.equal(gs.fixStrayClosingTags("just text"), "just text");
+});
+
+test("repairHtmlParts: repairs the HTML part and leaves the plain part alone", () => {
+  const raw =
+    "\r\n--b\r\nContent-Type: text/plain\r\n\r\nmy new text\r\n" +
+    "\r\n--b\r\nContent-Type: text/html\r\n\r\n" + GMAIL_REPLY_HTML + "\r\n" +
+    "\r\n--b--\r\n";
+  const fixed = gs.repairHtmlParts(raw);
+  assert.ok(fixed.includes("\r\n--b\r\n"), "MIME boundaries survive");
+  assert.ok(fixed.includes("Content-Type: text/plain"), "plain part survives");
+  assert.ok(fixed.indexOf("gmail_quote") < fixed.indexOf("</body>"));
+});
+
+test("repairHtmlParts: a message with no HTML is returned byte-identical", () => {
+  const raw = "\r\n--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n\r\n--b--\r\n";
+  assert.equal(gs.repairHtmlParts(raw), raw);
+});
+
+test("buildOutbound: the transmitted reply has the quote inside the document", () => {
+  const raw = rawMessage(
+    { From: "me@gmail.com", To: "x@y.com", "Content-Type": "text/html" },
+    GMAIL_REPLY_HTML
+  );
+  const out = gs.buildOutbound(raw, { from: "hello@example.net", messageId: "<m@example.net>" });
+  assert.ok(out.transmit.indexOf("gmail_quote") < out.transmit.indexOf("</body>"));
+  assert.ok(out.transmit.includes("my new text"));
+  assert.ok(out.transmit.includes("the original"));
+});
+
 // ── Last-resort inference from quoted text ───────────────────────────────────
 
 test("inferDomainFromText: finds our domain in a quoted attribution line", () => {

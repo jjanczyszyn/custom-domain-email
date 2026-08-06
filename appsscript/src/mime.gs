@@ -229,6 +229,46 @@ function normalizeBase64(value) {
 }
 
 /**
+ * Move stray </body></html> tags to the end of an HTML fragment.
+ *
+ * Gmail's stored draft closes the document *before* the quoted reply:
+ *
+ *   <html><body><div>your text</div></body></html>
+ *   <br><div class="gmail_extra">…quote…</div>
+ *
+ * Everything after </html> is outside the document. Gmail's own sender
+ * normalises this on the way out; the relay bypasses that sender, so the
+ * malformed markup reaches the recipient, whose client then collapses the
+ * whole body behind a "trimmed content" marker — the message looks empty.
+ *
+ * Content is never added or removed, only the closing tags are relocated.
+ */
+function fixStrayClosingTags(html) {
+  if (!/<\/html\s*>/i.test(html)) return html;
+
+  // Nothing of substance after the close: already well-formed, leave it alone.
+  var trailing = html.replace(/[\s\S]*<\/html\s*>/i, '');
+  if (!/\S/.test(trailing)) return html;
+
+  var cleaned = html.replace(/<\/body\s*>/gi, '').replace(/<\/html\s*>/gi, '');
+  return cleaned.replace(/\s+$/, '') + '</body></html>';
+}
+
+/**
+ * Apply the repair to every part of a message, leaving MIME structure intact.
+ * Splits on boundary lines rather than parsing MIME, so nested multiparts and
+ * unknown content types pass through untouched.
+ */
+function repairHtmlParts(raw) {
+  var segments = String(raw).split(/(\r?\n--[^\r\n]*(?:\r?\n|$))/);
+  for (var i = 0; i < segments.length; i++) {
+    if (/^\r?\n--/.test(segments[i])) continue; // a boundary, not content
+    segments[i] = fixStrayClosingTags(segments[i]);
+  }
+  return segments.join('');
+}
+
+/**
  * Find the first of our domains mentioned in a block of text.
  *
  * Last-resort inference for a reply Gmail never marked as one: no thread, no
@@ -282,7 +322,10 @@ function isOversize(raw) {
 function buildOutbound(raw, options) {
   var parts = splitMime(raw);
   var header = parts.header;
-  var body = parts.body;
+
+  // Gmail's draft markup closes the document before the quoted reply. Left
+  // alone, recipients see an apparently empty message. See fixStrayClosingTags.
+  var body = repairHtmlParts(parts.body);
 
   var recipients = collectRecipients(header);
   var originalFrom = readHeader(header, 'From');
@@ -350,6 +393,8 @@ if (typeof module !== 'undefined') {
     parseSubjectToken: parseSubjectToken,
     resolveAlias: resolveAlias,
     inferAlias: inferAlias,
+    fixStrayClosingTags: fixStrayClosingTags,
+    repairHtmlParts: repairHtmlParts,
     inferDomainFromText: inferDomainFromText,
     normalizeBase64: normalizeBase64,
     utf8ByteLength: utf8ByteLength,

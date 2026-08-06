@@ -259,6 +259,34 @@ than an input, stop theorising and spend the cycle on making the error name its
 input. One diagnostic beats three guesses, and it is cheaper than the first
 guess. `inspectDrafts()` in `setup.gs` exists for the same reason.
 
+**15. Recipients saw an empty message.**
+
+Every relayed reply arrived looking blank — the entire body collapsed behind
+the recipient's "trimmed content" marker, so a reader would not know there was
+anything to expand. Not a delivery failure, and invisible from the sender's
+Sent folder: strictly worse than a bounce, because it looks like it worked.
+
+The cause is in Gmail's stored draft, not in anything the relay does:
+
+    <html><body><div>your text</div></body></html>
+    <br><div class="gmail_extra">…quote…</div>
+
+The document is closed *before* the quoted reply, leaving the quote outside
+`<body>`. Gmail's own sender normalises this on the way out. The relay bypasses
+that sender, so the malformed markup reaches the recipient as-is and their
+client collapses the lot.
+
+**Mitigation:** `repairHtmlParts()` relocates the stray closing tags to the end
+of each part. Content is never added or removed. Verified against the bytes SES
+actually transmitted, pulled from the inbound S3 copy, rather than from what the
+composer appeared to produce.
+
+**The lesson worth keeping:** passing a body through byte-for-byte is not the
+same as passing it through *correctly*. The relay was faithfully forwarding
+markup that only ever worked because Gmail repaired it at send time — an
+invariant supplied by the component we replaced. When you take over one stage of
+a pipeline, audit what that stage was silently fixing.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The
