@@ -78,10 +78,29 @@ terraform output relay_access_key_id
 terraform output -raw relay_secret_access_key
 ```
 
-**2. Create the Apps Script project.** Go to
-[script.google.com](https://script.google.com), create a new project, and copy
-in every file from `src/` (as `.gs` files) plus `appsscript.json` (Project
-Settings → *Show "appsscript.json" manifest file in editor*).
+**2. Create the Apps Script project.** Use
+[clasp](https://github.com/google/clasp), Google's CLI — you will be editing
+this code while testing, and re-pushing beats re-pasting six files:
+
+```bash
+npm install -g @google/clasp
+clasp login                                    # opens a browser
+cd appsscript
+clasp create --type standalone --title "Domain mail relay" --rootDir src
+clasp push
+clasp open
+```
+
+`clasp create` writes `.clasp.json` with your script ID. It is gitignored —
+`.clasp.json.example` shows the shape. After any local edit, `clasp push`.
+
+<details>
+<summary>Without clasp</summary>
+
+Create a project at [script.google.com](https://script.google.com), then copy
+in each file from `src/` as a `.gs` file of the same name, plus `appsscript.json`
+via Project Settings → *Show "appsscript.json" manifest file in editor*.
+</details>
 
 **3. Fill in Script Properties** (Project Settings → Script Properties). These
 are the only place credentials live — nothing secret is committed to this repo.
