@@ -147,40 +147,10 @@ test("parseDomainNames: parses pairs and lowercases the domain key", () => {
   assert.equal(map["example.net"], "Ex Net");
 });
 
-test("parseDomainNames: entries without a delimiter are ignored, not fatal", () => {
+test("parseDomainNames: entries without an '=' are ignored, not fatal", () => {
   assert.deepEqual(gs.parseDomainNames("broken,example.com=Ok"), { "example.com": "Ok" });
   assert.deepEqual(gs.parseDomainNames(""), {});
   assert.deepEqual(gs.parseDomainNames(null), {});
-});
-
-// This value is typed into a web form with no validation. Every shape below is
-// something a person would reasonably enter, and each previously parsed to {} —
-// a silent fallback to the bare local part with nothing said.
-test("parseDomainNames: accepts newlines and semicolons between entries", () => {
-  const expected = { "example.com": "Example Co", "example.net": "Ex Net" };
-  assert.deepEqual(gs.parseDomainNames("example.com=Example Co\nexample.net=Ex Net"), expected);
-  assert.deepEqual(gs.parseDomainNames("example.com=Example Co; example.net=Ex Net"), expected);
-  assert.deepEqual(gs.parseDomainNames("example.com=Example Co,\r\nexample.net=Ex Net"), expected);
-});
-
-test("parseDomainNames: accepts a colon as well as an equals sign", () => {
-  assert.deepEqual(gs.parseDomainNames("example.com: Example Co"), { "example.com": "Example Co" });
-});
-
-test("parseDomainNames: strips quotes people wrap around the name", () => {
-  assert.deepEqual(gs.parseDomainNames('example.com="Example Co"'), { "example.com": "Example Co" });
-  assert.deepEqual(gs.parseDomainNames("example.com='Example Co'"), { "example.com": "Example Co" });
-});
-
-test("parseDomainNames: tolerates padding and trailing separators", () => {
-  assert.deepEqual(gs.parseDomainNames("  example.com  =  Example Co  ,,"), {
-    "example.com": "Example Co",
-  });
-});
-
-test("parseDomainNames: a name containing a dot survives", () => {
-  // Real case: a brand whose name is its domain.
-  assert.deepEqual(gs.parseDomainNames("example.org=Example.org"), { "example.org": "Example.org" });
 });
 
 test("displayNameFor: matches on domain, case-insensitively", () => {

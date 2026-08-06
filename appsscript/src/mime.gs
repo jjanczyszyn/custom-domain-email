@@ -91,25 +91,16 @@ function parseDomainList(value) {
 
 /**
  * Parse the DOMAIN_NAMES property: "example.com=Example Co,example.net=Ex Net".
- *
- * Deliberately forgiving. This value is typed into a web form with no
- * validation and no feedback, so insisting on one exact punctuation style just
- * produces a silent fallback to the bare local part with nothing said. Entries
- * may be separated by commas, semicolons, or newlines; domain and name by `=`
- * or `:`; and the name may be quoted. Keys are lowercased so lookups are
- * case-insensitive.
- *
- * The cost is that a display name cannot itself contain a separator, which for
- * brand names is a trade worth making.
+ * Keys are lowercased so lookups are case-insensitive.
  */
 function parseDomainNames(value) {
   var map = {};
-  var entries = String(value || '').split(/[,;\r\n]+/);
+  var entries = String(value || '').split(',');
   for (var i = 0; i < entries.length; i++) {
-    var m = entries[i].match(/^\s*([A-Za-z0-9.\-]+)\s*[=:]\s*(.+?)\s*$/);
-    if (!m) continue;
-    var domain = m[1].toLowerCase();
-    var name = m[2].replace(/^["']+|["']+$/g, '').trim();
+    var eq = entries[i].indexOf('=');
+    if (eq === -1) continue;
+    var domain = entries[i].slice(0, eq).trim().toLowerCase();
+    var name = entries[i].slice(eq + 1).trim();
     if (domain && name) map[domain] = name;
   }
   return map;
