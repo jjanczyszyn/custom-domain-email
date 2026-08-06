@@ -13,9 +13,9 @@ uses SES SMTP wired into Gmail's "Send mail as".
 ## What it costs
 
 Around **$1/month** at personal volume, almost all of which is the optional
-monitoring (3 CloudWatch alarms + 1 custom metric). Mail receiving, sending,
-Lambda, and S3 sit inside free tiers. Route53 hosted zones are billed separately
-at $0.50/zone whether or not you run this.
+monitoring (4 CloudWatch alarms + 1 custom metric). Mail receiving, sending,
+Lambda, S3, and the dead-letter SQS queue sit inside free tiers. Route53 hosted
+zones are billed separately at $0.50/zone whether or not you run this.
 
 ## Requirements
 
@@ -60,6 +60,12 @@ After cutover:
    One credential set works for every domain. Gmail emails a confirmation code to
    `hello@yourdomain`, which now forwards into your inbox.
 
+   > **Gmail removes "Send as" for third-party addresses in January 2027**, and
+   > will restrict *new* configurations before then. Set this up now if you
+   > still can — it works until the deadline — but the durable replacement is
+   > the outbound relay below. Inbound forwarding is explicitly unaffected by
+   > that change.
+
 5. **Leave the sandbox** (optional, free) to reply to anyone, not just verified
    addresses: request production access in the SES console.
 
@@ -75,6 +81,25 @@ give the address its own free Google profile:
 3. Enter the verification code Google sends (it forwards into your inbox).
 4. Set the profile photo. Recipients now see it next to your emails.
 
+## Sending after January 2027
+
+Gmail is removing "Send as" for third-party addresses in January 2027. That
+kills the outbound half of this project — the inbound half is untouched, and
+Google confirms that forwarding into Gmail is unaffected.
+
+[`appsscript/`](appsscript/) is the replacement, and it keeps composing in
+Gmail. Write a draft as normal, mark it with the `SES/Outbox` label or a `>>`
+subject prefix, and a one-minute Apps Script trigger relays it through SES as
+one of your domains, then files the copy in Sent with the same Message-ID so
+replies keep threading. Works on web and mobile; costs nothing extra.
+
+Setup is in [`appsscript/README.md`](appsscript/README.md). The design, and the
+failure cases it is built around, are in
+[`docs/relay-premortem.md`](docs/relay-premortem.md).
+
+Both paths work until the deadline, so run them side by side and compare before
+Send-As disappears.
+
 ## How it works
 
 ```
@@ -82,6 +107,7 @@ mail -> Route53 MX -> SES receipt rule -> S3 (raw) ┐
                                                     ├─> Lambda -> SES SendRawEmail -> Gmail
                                              invoke ┘
 reply <- Gmail "Send mail as" <- SES SMTP <───────────────────────────────────────────────┘
+   or <- Apps Script relay ---- SES API <──────────────────────────────────────────────────┘
 ```
 
 - **`main.tf`** loads `config/domains.yaml` and builds the routing map.
@@ -90,6 +116,7 @@ reply <- Gmail "Send mail as" <- SES SMTP <────────────�
 - **`monitoring.tf`** SNS alerts, alarms, heartbeat canary.
 - **`lambda/src/`** forwarder runtime (`lib.mjs` pure logic, `index.mjs` handler).
 - **`lambda/test/`** unit tests. **`canary/`** heartbeat sender.
+- **`appsscript/`** the outbound relay that replaces Gmail "Send as".
 
 ## Tests
 
@@ -105,17 +132,70 @@ until it passes. The handler stays a thin I/O shell over the tested functions.
 
 ## Monitoring
 
-You get an email (SNS to `alert_email`) if anything breaks:
+There are deliberately **no CloudWatch alarms**. Every failure instead arrives as
+a plain email to `alert_email`, so mail always shows up in some form and you know
+to poke the pipeline for a fix:
 
-- **forwarder-errors** / **forwarder-throttles** if the Lambda fails.
-- **heartbeat-missing** if the end-to-end pipeline goes silent. A canary emails
-  `probe@<first-domain>` hourly through the real path; the forwarder records a
-  `CanaryHeartbeat` metric on arrival. If none lands inside the window, the alarm
-  fires, which catches silent failures a plain error alarm cannot (MX changed,
-  receipt rule disabled).
+- **Dead-lettered forwards → an email.** SES invokes the forwarder
+  asynchronously, so any invocation that still throws after its retries is routed
+  to an SQS dead-letter queue (`*-forwarder-dlq`) instead of vanishing. The
+  `*-notifier` Lambda consumes that queue and emails you a summary — who it was
+  from, the subject, why it failed, and the `aws s3 cp` command to fetch the full
+  original (still in S3). A delivery failure is always surfaced, never silent.
+- **Silent pipeline → an email.** A canary emails `probe@<first-domain>` hourly
+  through the real path; the forwarder records a `CanaryHeartbeat` metric on
+  arrival. On each run the canary first checks that recent probes were recorded —
+  if none were, the whole inbound path is down (MX changed, receipt rule
+  disabled, forwarder broken) and no in-pipeline email could ever fire, so the
+  canary emails you directly. This is the one failure the DLQ notifier can't
+  catch, because nothing reaches the forwarder to dead-letter.
 
-Confirm the SNS subscription email AWS sends after the first apply, or alarms
-cannot reach you.
+### Filing the alerts in Gmail
+
+Every alert — from the DLQ notifier, the canary watchdog, or the relay — has a
+subject starting `[SES alert]`. One Gmail filter catches all of them. Search
+options → **Has the words**:
+
+```
+subject:"SES alert"
+```
+
+They arrive over two independent channels: the Lambdas send through SES, and
+the relay sends through Apps Script's `MailApp`. That is deliberate — the relay
+cannot rely on SES to tell you SES is broken — and it is why they share a
+subject prefix rather than a sender.
+
+The prefix is declared in three places (`appsscript/src/config.gs`,
+`notifier/index.mjs`, `canary/index.mjs`) because those are separate runtimes
+sharing no code. `appsscript/test/alert-prefix.test.mjs` fails if they drift,
+since a stale prefix would silently stop alerts being filed.
+
+Note that Gmail strips the brackets when searching, so the filter matches the
+phrase "SES alert" rather than the literal `[SES alert]`. The brackets are for
+your eye in the inbox.
+
+Apply a label (e.g. `SES/Alerts`) and tick **Never send it to Spam** — alerts
+arrive from your own domain, which is exactly the shape spam filters distrust.
+Do *not* have them skip the inbox; the whole point is that you see them.
+
+### Oversize mail
+
+SES *receives* up to 40 MB but `SendRawEmail` only *sends* up to 10 MB, so a
+message in that gap can't be forwarded whole. Instead of failing (and dropping
+it), the forwarder:
+
+1. **Recompresses images to fit.** Most oversize mail is photos. It re-encodes
+   the images (largest first, highest quality that still fits) until the message
+   is under 10 MB and forwards it as a normal email — inline photos intact, just
+   at lower resolution. This handles the common case transparently.
+2. **Falls back to an archive notice** when images alone can't get under the
+   limit (e.g. a large video). The original is copied to the `archive/` prefix
+   (which the lifecycle rule never expires) and you get a small notice with the
+   sender, subject, size, and the `aws s3 cp` command to pull the full original.
+
+Either way a large email is never silently dropped. (An earlier design served the
+fallback as a one-click Lambda Function URL link, but this AWS account blocks
+public function URLs, so the private S3 archive is the durable path instead.)
 
 ## Notes
 
@@ -126,3 +206,10 @@ cannot reach you.
 - Region defaults to `us-east-1` because SES inbound is region-limited
   (us-east-1, us-west-2, eu-west-1).
 - Raw emails auto-delete from S3 after 30 days.
+- **This repo is public.** Your domains and addresses live in `config/domains.yaml`
+  and `.env`, both gitignored, and CI fails the build if either becomes tracked
+  or if an AWS key appears in a tracked file. Test fixtures use RFC 2606 reserved
+  example domains. One caveat: a real domain and name were committed in a test
+  fixture in `c87e925` and are still reachable in git history — the working tree
+  is clean, but scrubbing history needs a force-push, which rewrites hashes for
+  anyone who has cloned or forked.

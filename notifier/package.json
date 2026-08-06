@@ -1,0 +1,7 @@
+{
+  "name": "email-notifier",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Consumes the forwarder dead-letter queue and emails a plain failure summary to the operator."
+}

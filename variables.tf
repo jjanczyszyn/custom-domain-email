@@ -29,7 +29,7 @@ variable "inbound_retention_days" {
 }
 
 variable "alert_email" {
-  description = "Address that receives CloudWatch alarm notifications. Set via .env (TF_VAR_alert_email). Confirm the SNS subscription email once."
+  description = "Address that receives plain-text failure emails (dead-lettered forwards + silent-pipeline watchdog). Set via .env (TF_VAR_alert_email)."
   type        = string
 }
 
@@ -51,8 +51,20 @@ variable "canary_rate" {
   default     = "rate(1 hour)"
 }
 
+variable "relay_enabled" {
+  description = "Watch the Apps Script outbound relay's heartbeat. Leave false until the relay is installed, or the canary will email about a relay that was never there."
+  type        = bool
+  default     = false
+}
+
+variable "relay_window_seconds" {
+  description = "The watchdog emails you if the relay records no heartbeat within this window. The relay runs every minute, so an hour is already a long silence."
+  type        = number
+  default     = 3600
+}
+
 variable "heartbeat_window_seconds" {
-  description = "Alarm if no heartbeat is recorded within this window. Should comfortably exceed canary_rate."
+  description = "The watchdog emails you if no heartbeat is recorded within this window. Should comfortably exceed canary_rate."
   type        = number
   default     = 7200
 }

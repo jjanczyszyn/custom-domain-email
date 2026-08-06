@@ -14,6 +14,12 @@ cd "$(dirname "$0")"
 CUTOVER=false
 [[ "${1:-}" == "--cutover" ]] && CUTOVER=true
 
+# Bundle the forwarder's runtime dependencies (mailparser/jimp/nodemailer, used
+# to recompress oversize mail). Terraform's archive_file zips lambda/src as-is,
+# so node_modules must exist on disk before apply.
+echo "Installing Lambda dependencies..."
+( cd lambda/src && npm install --omit=dev --no-audit --no-fund )
+
 terraform init -input=false
 terraform apply -var "enable_mx_cutover=${CUTOVER}"
 
