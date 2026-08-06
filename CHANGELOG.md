@@ -27,10 +27,30 @@
   relay, `terraform fmt -check` and `validate`, and a check that no AWS key or
   private config reaches a tracked file.
 
+- **Per-domain sender names.** `DOMAIN_NAMES` maps each domain to the name
+  recipients see, so mail arrives from "Example Co" rather than the bare local
+  part. Note that SES's `FromEmailAddress` overrides the raw message's `From`
+  header, so the formatted value is passed to the API as well.
+- **`showConfig()` and `inspectDrafts()`**, run from the Apps Script editor, to
+  report what the relay actually parsed and what Gmail actually returned. Both
+  exist because silent fallbacks made three separate bugs invisible.
+
 ### Changed
 
 - `canary/index.mjs`: `heartbeatsInWindow()` now takes a metric name and window
   so it can serve both the inbound and relay checks.
+- The relay is split by responsibility — `state.gs`, `inference.gs`, `gmail.gs`,
+  `notify.gs` — leaving `relay.gs` as the decisions alone.
+- All relay runtime state lives under one `_relayState` property rather than one
+  per draft, so Script Properties shows only real configuration.
+- CI cancels superseded runs, so a queued run killed by a later push no longer
+  reports as a failure.
+
+### Removed
+
+- The stale-draft sweep and its `RelayStuckDrafts` metric. The sweep was
+  unreachable and the metric always published zero; an unresolvable draft now
+  reports itself on the first tick instead.
 
 ### Fixed
 

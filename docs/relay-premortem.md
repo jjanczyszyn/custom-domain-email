@@ -298,6 +298,34 @@ markup that only ever worked because Gmail repaired it at send time — an
 invariant supplied by the component we replaced. When you take over one stage of
 a pipeline, audit what that stage was silently fixing.
 
+**16. Every message went out showing "hello" instead of the brand.**
+
+Each domain is configured with a sender name, so recipients should see
+*Toward Love* rather than the bare local part. They saw `hello`. Not a delivery
+failure and invisible in the Sent copy — it just looked slightly wrong to
+everyone who received anything.
+
+Every layer verified correct in isolation: the property was set, it parsed into
+the right map, `displayNameFor()` returned the name, and `buildOutbound()` wrote
+`From: "Vibes Queen" <hello@…>` into the transmitted bytes. Confirmed by running
+the real code in Node, and by having the relay email its own parsed
+configuration.
+
+The value was destroyed one step later. **SES's `FromEmailAddress` parameter
+overrides the `From` header in the raw message** — we handed SES a perfect
+header and, alongside it, the bare address. SES did as instructed.
+
+**Mitigation:** `buildOutbound()` returns the formatted `from`, and that is what
+goes to SES, so the header and the API parameter cannot disagree. Two tests pin
+it, one asserting the two stay identical.
+
+**The lesson worth keeping:** when every component verifies correct but the
+output is wrong, the bug is in a *seam*, not a component — and specifically in
+the seam you haven't instrumented. Three rounds went into re-checking layers
+that were already proven correct. The moment the header was verified right in
+Node, the only unexamined step left was the API call, and that is where the
+next probe should have gone.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The

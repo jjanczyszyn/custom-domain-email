@@ -411,11 +411,12 @@ function buildOutbound(raw, options) {
   header = stripHeader(header, 'X-Google-.*');
   header = stripHeader(header, 'Received');
 
-  header = setHeader(
-    header,
-    'From',
-    fromHeaderValue(originalFrom, options.from, displayNameFor(options.from, options.domainNames))
+  var fromValue = fromHeaderValue(
+    originalFrom,
+    options.from,
+    displayNameFor(options.from, options.domainNames)
   );
+  header = setHeader(header, 'From', fromValue);
 
   if (options.subject !== undefined && options.subject !== null) {
     header = setHeader(header, 'Subject', options.subject);
@@ -432,6 +433,12 @@ function buildOutbound(raw, options) {
     archive: archive,
     messageId: withId.messageId,
     recipients: recipients,
+
+    // The fully formatted From, display name and all. SES's FromEmailAddress
+    // parameter OVERRIDES the From header in the raw message, so the caller
+    // must hand SES this value rather than the bare address — otherwise every
+    // message goes out with the header we carefully built silently replaced.
+    from: fromValue,
   };
 }
 

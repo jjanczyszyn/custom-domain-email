@@ -168,6 +168,28 @@ test("buildOutbound: the configured domain name is what recipients see", () => {
   assert.match(out.transmit, /From: "Ex Net" <hello@example\.net>/);
 });
 
+// SES's FromEmailAddress parameter OVERRIDES the From header in the raw
+// message. Returning the formatted value is what lets the caller hand SES the
+// same thing the header says; passing the bare address there silently discards
+// the display name, which is exactly how this shipped broken.
+test("buildOutbound: returns the formatted From for SES to use verbatim", () => {
+  const raw = rawMessage({ From: "me@gmail.com", To: "x@y.com" });
+  const out = gs.buildOutbound(raw, {
+    from: "hello@example.net",
+    messageId: "<m@example.net>",
+    domainNames: NAMES,
+  });
+  assert.equal(out.from, '"Ex Net" <hello@example.net>');
+  // The header and the value handed to SES must agree, or one silently wins.
+  assert.ok(out.transmit.includes("From: " + out.from));
+});
+
+test("buildOutbound: the returned From is the bare address when no name applies", () => {
+  const raw = rawMessage({ From: "me@gmail.com", To: "x@y.com" });
+  const out = gs.buildOutbound(raw, { from: "hello@unconfigured.com", messageId: "<m@u.com>" });
+  assert.equal(out.from, "hello@unconfigured.com");
+});
+
 test("buildOutbound: the domain name beats the draft's own display name", () => {
   // The draft carries the Gmail account holder's name; the brand should win.
   const raw = rawMessage({ From: '"Ada Lovelace" <me@gmail.com>', To: "x@y.com" });

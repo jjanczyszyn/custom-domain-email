@@ -205,7 +205,10 @@ function processDraft(draft, decision, cfg, props, state) {
     saveState(props, state);
     if (decision.labelled && decision.thread) removeLabel(decision.thread, LABEL_OUTBOX);
 
-    sesSendRaw(cfg, decision.alias, built.checked.ok, built.transmit);
+    // built.from, not decision.alias: SES's FromEmailAddress overrides the
+    // From header in the raw message, so the bare address would erase the
+    // display name we just put there.
+    sesSendRaw(cfg, built.from, built.checked.ok, built.transmit);
     accepted = true;
 
     archiveToSent(built.archive, decision.thread);

@@ -76,6 +76,11 @@ function awsFetch(cfg, service, host, path, body, contentType) {
  * strip Bcc from the transmitted bytes while still delivering to the blind
  * recipients. See docs/relay-premortem.md item 2.
  *
+ * `fromAddress` must be the FULLY FORMATTED From value, display name included.
+ * FromEmailAddress overrides whatever the raw message's From header says, so
+ * passing a bare address here silently discards the display name and every
+ * message goes out showing the local part.
+ *
  * Throws on any non-2xx so the caller can report the real error verbatim.
  */
 function sesSendRaw(cfg, fromAddress, recipients, rawMessage) {
