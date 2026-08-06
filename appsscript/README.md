@@ -138,6 +138,7 @@ are the only place credentials live — nothing secret is committed to this repo
 | `AWS_REGION` | `us-east-1` (must match your SES region) |
 | `DOMAINS` | comma-separated, e.g. `example.com,example.net` |
 | `DEFAULT_LOCALPART` | `hello` — used when a domain is named without a local part |
+| `DOMAIN_NAMES` | optional sender names per domain, `example.com=Example Co,example.net=Ex Net`. Without one, clients show the bare local part — "hello" — rather than your brand. |
 | `ALERT_EMAIL` | where failure emails go |
 | `METRIC_NAMESPACE` | `EmailForwarder`, matching `var.metric_namespace` |
 | `SETTLE_SECONDS` | optional, default `45` |

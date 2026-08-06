@@ -97,6 +97,62 @@ test("buildOutbound: From is rewritten to the alias, display name preserved", ()
   assert.doesNotMatch(out.transmit, /me@gmail\.com/);
 });
 
+// ── Per-domain sender names ──────────────────────────────────────────────────
+
+const NAMES = {
+  "example.com": "Example Co",
+  "example.net": "Ex Net",
+};
+
+test("parseDomainNames: parses pairs and lowercases the domain key", () => {
+  const map = gs.parseDomainNames("Example.COM=Example Co, example.net=Ex Net");
+  assert.equal(map["example.com"], "Example Co");
+  assert.equal(map["example.net"], "Ex Net");
+});
+
+test("parseDomainNames: entries without an '=' are ignored, not fatal", () => {
+  assert.deepEqual(gs.parseDomainNames("broken,example.com=Ok"), { "example.com": "Ok" });
+  assert.deepEqual(gs.parseDomainNames(""), {});
+  assert.deepEqual(gs.parseDomainNames(null), {});
+});
+
+test("displayNameFor: matches on domain, case-insensitively", () => {
+  assert.equal(gs.displayNameFor("hello@EXAMPLE.com", NAMES), "Example Co");
+  assert.equal(gs.displayNameFor("hello@unconfigured.com", NAMES), "");
+});
+
+test("buildOutbound: the configured domain name is what recipients see", () => {
+  const raw = rawMessage({ From: "me@gmail.com", To: "x@y.com" });
+  const out = gs.buildOutbound(raw, {
+    from: "hello@example.net",
+    messageId: "<m@example.net>",
+    domainNames: NAMES,
+  });
+  assert.match(out.transmit, /From: "Ex Net" <hello@example\.net>/);
+});
+
+test("buildOutbound: the domain name beats the draft's own display name", () => {
+  // The draft carries the Gmail account holder's name; the brand should win.
+  const raw = rawMessage({ From: '"Ada Lovelace" <me@gmail.com>', To: "x@y.com" });
+  const out = gs.buildOutbound(raw, {
+    from: "hello@example.com",
+    messageId: "<m@example.com>",
+    domainNames: NAMES,
+  });
+  assert.match(out.transmit, /From: "Example Co" <hello@example\.com>/);
+  assert.doesNotMatch(out.transmit, /Ada Lovelace/);
+});
+
+test("buildOutbound: an unconfigured domain falls back to the draft's name", () => {
+  const raw = rawMessage({ From: '"Ada Lovelace" <me@gmail.com>', To: "x@y.com" });
+  const out = gs.buildOutbound(raw, {
+    from: "hello@example.org",
+    messageId: "<m@example.org>",
+    domainNames: NAMES,
+  });
+  assert.match(out.transmit, /From: "Ada Lovelace" <hello@example\.org>/);
+});
+
 test("buildOutbound: a bare From becomes a bare alias", () => {
   const raw = rawMessage({ From: "me@gmail.com", To: "x@y.com" });
   const out = gs.buildOutbound(raw, { from: "hello@example.org", messageId: "<m@example.org>" });

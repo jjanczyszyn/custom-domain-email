@@ -63,13 +63,47 @@ function ensureMessageId(header, generated) {
   return { header: setHeader(header, 'Message-ID', generated), messageId: generated };
 }
 
-/** Format a From header, preserving the draft's display name when present. */
-function fromHeaderValue(originalFrom, address) {
-  var name = '';
-  var m = originalFrom.match(/^\s*("?)(.*?)\1\s*<[^>]*>\s*$/);
-  if (m && m[2].trim()) name = m[2].trim();
+/**
+ * Format a From header.
+ *
+ * A configured per-domain name wins: it is the brand the recipient should see,
+ * and it beats both the draft's own display name (which is the Gmail account
+ * holder's) and the bare address. With no name at all, mail clients fall back
+ * to showing the local part — "hello" — which is why this matters.
+ */
+function fromHeaderValue(originalFrom, address, displayName) {
+  var name = displayName ? String(displayName).trim() : '';
+  if (!name) {
+    var m = String(originalFrom || '').match(/^\s*("?)(.*?)\1\s*<[^>]*>\s*$/);
+    if (m && m[2].trim()) name = m[2].trim();
+  }
   if (!name) return address;
   return '"' + name.replace(/"/g, '') + '" <' + address + '>';
+}
+
+/**
+ * Parse the DOMAIN_NAMES property: "example.com=Example Co,example.net=Ex Net".
+ * Keys are lowercased so lookups are case-insensitive.
+ */
+function parseDomainNames(value) {
+  var map = {};
+  var entries = String(value || '').split(',');
+  for (var i = 0; i < entries.length; i++) {
+    var eq = entries[i].indexOf('=');
+    if (eq === -1) continue;
+    var domain = entries[i].slice(0, eq).trim().toLowerCase();
+    var name = entries[i].slice(eq + 1).trim();
+    if (domain && name) map[domain] = name;
+  }
+  return map;
+}
+
+/** The configured display name for an address's domain, or '' if none. */
+function displayNameFor(address, domainNames) {
+  var at = String(address || '').indexOf('@');
+  if (at === -1) return '';
+  var domain = address.slice(at + 1).toLowerCase();
+  return (domainNames && domainNames[domain]) || '';
 }
 
 /**
@@ -338,7 +372,11 @@ function buildOutbound(raw, options) {
   header = stripHeader(header, 'X-Google-.*');
   header = stripHeader(header, 'Received');
 
-  header = setHeader(header, 'From', fromHeaderValue(originalFrom, options.from));
+  header = setHeader(
+    header,
+    'From',
+    fromHeaderValue(originalFrom, options.from, displayNameFor(options.from, options.domainNames))
+  );
 
   if (options.subject !== undefined && options.subject !== null) {
     header = setHeader(header, 'Subject', options.subject);
@@ -393,6 +431,8 @@ if (typeof module !== 'undefined') {
     parseSubjectToken: parseSubjectToken,
     resolveAlias: resolveAlias,
     inferAlias: inferAlias,
+    parseDomainNames: parseDomainNames,
+    displayNameFor: displayNameFor,
     fixStrayClosingTags: fixStrayClosingTags,
     repairHtmlParts: repairHtmlParts,
     inferDomainFromText: inferDomainFromText,

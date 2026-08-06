@@ -298,6 +298,7 @@ function processDraft(draft, decision, cfg, props) {
       from: decision.alias,
       messageId: messageId,
       subject: decision.subject,
+      domainNames: cfg.domainNames,
     });
 
     if (isOversize(built.transmit)) {

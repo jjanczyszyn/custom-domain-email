@@ -28,6 +28,7 @@ var PROP_METRIC_NAMESPACE = 'METRIC_NAMESPACE';
 var PROP_SETTLE_SECONDS = 'SETTLE_SECONDS';
 var PROP_STALE_MINUTES = 'STALE_MINUTES';
 var PROP_SUBJECT_TOKEN = 'SUBJECT_TOKEN';
+var PROP_DOMAIN_NAMES = 'DOMAIN_NAMES';
 
 /** Read and validate configuration. Throws with a useful message if unusable. */
 function getConfig() {
@@ -46,6 +47,10 @@ function getConfig() {
       .map(function (d) { return d.trim(); })
       .filter(function (d) { return d.length > 0; }),
     defaultLocalpart: get(PROP_DEFAULT_LOCALPART, 'hello'),
+
+    // Per-domain sender names, so recipients see the brand rather than the
+    // local part. "example.com=Example Co,example.net=Ex Net"
+    domainNames: parseDomainNames(get(PROP_DOMAIN_NAMES, '')),
     alertEmail: get(PROP_ALERT_EMAIL, ''),
     metricNamespace: get(PROP_METRIC_NAMESPACE, 'EmailForwarder'),
     settleSeconds: parseInt(get(PROP_SETTLE_SECONDS, '45'), 10),
