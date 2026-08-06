@@ -31,15 +31,33 @@ function relayTick() {
 
     var sent = 0;
     var stale = 0;
+    var unreadable = 0;
     var drafts = GmailApp.getDrafts();
 
     for (var i = 0; i < drafts.length; i++) {
-      var decision = classifyDraft(drafts[i], cfg, props);
+      var decision;
+      try {
+        decision = classifyDraft(drafts[i], cfg, props);
+      } catch (e) {
+        // GmailApp.getDrafts() returns drafts it cannot then read — a scheduled
+        // send, or one in some other state that rejects getMessage() with
+        // "Gmail operation not allowed". Letting that propagate would abort the
+        // whole run, so a single unrelated draft sitting in the mailbox would
+        // silently stop all outbound mail. Skip it and keep going.
+        unreadable++;
+        console.warn('skipping unreadable draft: ' + (e.message || e));
+        continue;
+      }
+
       if (decision.action === 'send') {
         if (processDraft(drafts[i], decision, cfg, props)) sent++;
       } else if (decision.action === 'defer' && decision.stale) {
         stale++;
       }
+    }
+
+    if (unreadable > 0) {
+      console.log('skipped ' + unreadable + ' unreadable draft(s) of ' + drafts.length);
     }
 
     if (stale > 0) reportStuckDrafts(cfg, stale);

@@ -213,6 +213,29 @@ arrive in the inbox like any other mail.
 
 ---
 
+---
+
+## Found in testing, not in the pre-mortem
+
+**13. One unrelated draft stopped all outbound mail.**
+
+`GmailApp.getDrafts()` returns drafts that it will then refuse to read —
+`draft.getMessage()` throws `Gmail operation not allowed` for a scheduled send,
+and apparently for other states too. The scan loop had no per-draft guard, so a
+single such draft anywhere in the mailbox aborted the entire run, every run.
+Nothing would send, and the only visible symptom was an execution log nobody
+reads. Found immediately on a mailbox with 29 pre-existing drafts.
+
+This is the same *class* as item 3 — the relay stops and stays quiet — but the
+pre-mortem only imagined the trigger dying, not the trigger running fine and
+failing on its first line of real work. The lesson worth keeping: an iteration
+over other people's data needs a per-item guard, because the loop's failure mode
+is not "skip one" but "process none".
+
+**Mitigation:** each draft is classified inside its own try/catch; unreadable
+ones are counted and logged, and the run continues. The relay heartbeat still
+fires, so item 3's watchdog stays meaningful.
+
 ## Deliberately not solved
 
 - **Undo Send.** Gmail's is a client-side hold, unavailable to us. The
