@@ -13,12 +13,13 @@ against, including the ones found the hard way.
 tracked files. CI blocks AWS keys and tracked private config, but it does
 **not** detect real domain names. Grep the diff before committing.
 
-## State: fixed and waiting on a Gmail quota reset
+## State: fixed, deployed, and beating again
 
-⚠️ **The relay is not sending right now, and will resume on its own.** It ran
-out of Apps Script's Gmail quota (20,000 calls/day, consumer account) at about
-**21:21 UTC on 6 Aug**, after 314 ticks. The `RelayHeartbeat` metric shows it
-exactly — 60 ticks an hour from 15:32 UTC, then nothing:
+The relay ran out of Apps Script's Gmail quota (20,000 calls/day, consumer
+account) at about **21:00 UTC on 6 Aug**, after ~314 ticks. It did not stop
+dead — it began missing ticks as it hit the ceiling, and `GmailApp.getDrafts()`
+threw on the ones that failed. The `RelayHeartbeat` metric is how to see this,
+and the first thing to check whenever outbound looks wrong:
 
 ```bash
 aws cloudwatch get-metric-statistics --namespace EmailForwarder \
@@ -29,21 +30,22 @@ aws cloudwatch get-metric-statistics --namespace EmailForwarder \
 
 The old scan read every draft in the mailbox every minute — 30 abandoned drafts
 at ~2.1 Gmail calls each is ~64 calls a tick, so the day's allowance was gone in
-under six hours. **The quota resets ~24h after the first call of the day, so
-roughly 15:30 UTC / 17:30 CEST on 7 Aug**, and the relay starts working again
-by itself. Until then, Gmail "Send as" still works — that fallback exists until
-January 2027.
+under six hours.
 
-**The fix is written, tested, and already pushed to Apps Script** (`clasp push`,
-so the live script is the fixed one). A targeted scan now costs ~3 calls a tick
-regardless of mailbox size, with a full sweep once an hour as the safety net —
-about 6,200 calls a day against 20,000. Branch `relay-gmail-quota`, PR #3, and
+**Fixed, tested, and already pushed to Apps Script** — the live script is the
+fixed one. A targeted scan now costs ~3 calls a tick regardless of mailbox size,
+with a full sweep once an hour as the safety net: ~4,000 calls a day against
+20,000, now that the drafts are cleared. Branch `relay-gmail-quota`, PR #3;
 pre-mortem item 18 is the full write-up.
 
-**First thing to check after the reset:** the execution log should show
-`targeted scan examined 0 draft(s)` most minutes and `full scan examined 30` once
-an hour. Then send one real test message — the fixed scan path has never run
-against live Gmail, only against unit tests.
+The heartbeat resumed within minutes of the deploy, which is the proof the new
+scan path works against live Gmail. Expect some missed ticks until the quota
+window rolls over (~24h after the day's first call, so around 15:30 UTC on
+7 Aug) — the day's allowance was already spent before the fix landed.
+
+**Still to confirm:** the execution log should read `targeted scan examined 0
+draft(s)` most minutes and `full scan examined N` once an hour. Then send one
+real test message — the fixed path has proved it runs, not yet that it sends.
 
 ## What was verified before all this
 
@@ -125,7 +127,10 @@ Gmail actually returned). Both exist because silent fallbacks hid real bugs.
   affordable are separate reviews; only the first one was done.
 - **An alert on a repeating condition needs a throttle.** The run-failure email
   fired on every tick, so one stuck relay also burned the separate
-  100-recipients-a-day quota that the real per-draft alerts need.
+  100-recipients-a-day quota that the real per-draft alerts need. There are now
+  two guards: one alert per fault per four hours, and a flat ceiling of four an
+  hour / twenty a day across every call site. Raise them in `notify.gs`
+  (`ALERT_THROTTLE_MS`, `ALERT_BUDGET_WINDOWS`) if they ever feel too quiet.
 
 - **SES's `FromEmailAddress` overrides the raw message's `From` header.** Pass
   the fully formatted value or the display name is silently discarded.
