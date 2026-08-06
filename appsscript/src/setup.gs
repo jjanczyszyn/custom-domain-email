@@ -49,7 +49,17 @@ function removeTriggers() {
  * "did my setting take effect?" is visible instead of inferred.
  */
 function showConfig() {
-  var cfg = getConfig();
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var cfg = getConfig(all);
+
+  // Echo the raw value too. When the parsed result is empty the question is
+  // always "is the property missing, or is its value a shape I don't accept?",
+  // and only the raw string answers it.
+  var rawNames = all[PROP_DOMAIN_NAMES];
+  var rawReport =
+    rawNames === undefined
+      ? '(property not set)'
+      : JSON.stringify(rawNames) + '  [' + String(rawNames).length + ' chars]';
 
   var senders = [];
   for (var i = 0; i < cfg.domains.length; i++) {
@@ -71,6 +81,8 @@ function showConfig() {
       '  Subject token: ' + (cfg.subjectToken || '(disabled)') + '\n' +
       '  Settle:        ' + cfg.settleSeconds + 's\n' +
       '  Domains:       ' + cfg.domains.length + '\n' +
+      '  DOMAIN_NAMES raw: ' + rawReport + '\n' +
+      '  DOMAIN_NAMES parsed: ' + JSON.stringify(cfg.domainNames) + '\n' +
       'How each domain will appear to recipients:\n' + senders.join('\n')
   );
 }
