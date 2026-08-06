@@ -152,18 +152,27 @@ to poke the pipeline for a fix:
 
 ### Filing the alerts in Gmail
 
-Every alert comes from one of two senders, so a single Gmail filter catches all
-of them. Search options → **Has the words**:
+Every alert — from the DLQ notifier, the canary watchdog, or the relay — has a
+subject starting `[SES alert]`. One Gmail filter catches all of them. Search
+options → **Has the words**:
 
 ```
-from:no-reply@<first-domain> OR (from:me subject:relay)
+subject:"SES alert"
 ```
 
-The first clause covers the AWS-side alerts (DLQ notifier and canary watchdog,
-both sent from `no-reply@` on the first configured domain). The second covers
-the relay's own alerts, which are sent through Apps Script's `MailApp` — from
-your own address, and prefixed `[relay]`. Two channels on purpose: the relay
-cannot rely on SES to tell you SES is broken.
+They arrive over two independent channels: the Lambdas send through SES, and
+the relay sends through Apps Script's `MailApp`. That is deliberate — the relay
+cannot rely on SES to tell you SES is broken — and it is why they share a
+subject prefix rather than a sender.
+
+The prefix is declared in three places (`appsscript/src/config.gs`,
+`notifier/index.mjs`, `canary/index.mjs`) because those are separate runtimes
+sharing no code. `appsscript/test/alert-prefix.test.mjs` fails if they drift,
+since a stale prefix would silently stop alerts being filed.
+
+Note that Gmail strips the brackets when searching, so the filter matches the
+phrase "SES alert" rather than the literal `[SES alert]`. The brackets are for
+your eye in the inbox.
 
 Apply a label (e.g. `SES/Alerts`) and tick **Never send it to Spam** — alerts
 arrive from your own domain, which is exactly the shape spam filters distrust.

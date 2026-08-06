@@ -6,6 +6,10 @@ const ALERT_EMAIL = process.env.ALERT_EMAIL; // operator inbox
 const BUCKET = process.env.S3_BUCKET;
 const PREFIX = process.env.S3_PREFIX || "";
 
+// Every alert this pipeline sends starts with this, from any source, so a
+// single Gmail filter on the phrase catches all of them. See the README.
+const ALERT_PREFIX = "[SES alert]";
+
 // Pull a header value out of the SES event's parsed headers array.
 function header(mail, name) {
   const lower = name.toLowerCase();
@@ -66,7 +70,7 @@ export const handler = async (event) => {
         Source: FROM,
         Destination: { ToAddresses: [ALERT_EMAIL] },
         Message: {
-          Subject: { Data: `[Delivery failed — poke the pipeline] ${subject}` },
+          Subject: { Data: `${ALERT_PREFIX} Delivery failed — poke the pipeline: ${subject}` },
           Body: { Text: { Data: text } },
         },
       })

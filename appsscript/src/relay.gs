@@ -349,7 +349,9 @@ function tryAlert(subject, body) {
   try {
     var props = PropertiesService.getScriptProperties();
     var to = props.getProperty(PROP_ALERT_EMAIL);
-    if (to) MailApp.sendEmail(to, '[relay] ' + subject, body);
+    // Call sites already name the relay ("Relay could not send: ..."), so the
+    // prefix is all that needs adding.
+    if (to) MailApp.sendEmail(to, ALERT_SUBJECT_PREFIX + ' ' + subject, body);
   } catch (e) {
     console.error('could not send alert: ' + e.message);
   }

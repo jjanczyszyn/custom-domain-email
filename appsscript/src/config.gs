@@ -7,6 +7,11 @@
  * setup.gs writes them; this file reads and validates them.
  */
 
+// Every alert the pipeline sends — from here, the DLQ notifier, or the canary —
+// starts with this, so one Gmail filter on the phrase catches all of them.
+// Keep it in step with ALERT_PREFIX in notifier/ and canary/.
+var ALERT_SUBJECT_PREFIX = '[SES alert]';
+
 var LABEL_OUTBOX = 'SES/Outbox';
 var LABEL_FAILED = 'SES/Failed';
 var LABEL_REVIEW = 'SES/Needs-Review';

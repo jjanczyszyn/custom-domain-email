@@ -11,6 +11,10 @@ const WINDOW_SECONDS = parseInt(process.env.HEARTBEAT_WINDOW_SECONDS || "7200", 
 const RELAY_ENABLED = process.env.RELAY_ENABLED === "true";
 const RELAY_WINDOW_SECONDS = parseInt(process.env.RELAY_WINDOW_SECONDS || "3600", 10);
 
+// Every alert this pipeline sends starts with this, from any source, so a
+// single Gmail filter on the phrase catches all of them. See the README.
+const ALERT_PREFIX = "[SES alert]";
+
 // How many points of a heartbeat metric were recorded within a window.
 // CanaryHeartbeat is emitted by the forwarder when a probe reaches it through
 // the real inbound path, so a zero means that path is broken. RelayHeartbeat is
@@ -51,7 +55,7 @@ export const handler = async () => {
     const count = await heartbeatsInWindow();
     if (count === 0) {
       const hrs = (WINDOW_SECONDS / 3600).toFixed(1);
-      await emailAlert("[Email pipeline silent — poke the pipeline]", [
+      await emailAlert(`${ALERT_PREFIX} Email pipeline silent — poke the pipeline`, [
         `No inbound-pipeline heartbeat has been recorded in the last ${hrs} hours.`,
         "",
         "Probe mail is not making it through SES -> receipt rule -> forwarder,",
@@ -75,7 +79,7 @@ export const handler = async () => {
       const relayBeats = await heartbeatsInWindow("RelayHeartbeat", RELAY_WINDOW_SECONDS);
       if (relayBeats === 0) {
         const mins = Math.round(RELAY_WINDOW_SECONDS / 60);
-        await emailAlert("[Outbound relay silent — mail may not be sending]", [
+        await emailAlert(`${ALERT_PREFIX} Outbound relay silent — mail may not be sending`, [
           `The Gmail -> SES relay has not reported in for ${mins} minutes.`,
           "",
           "It runs on a one-minute Apps Script trigger, so any silence this long",
