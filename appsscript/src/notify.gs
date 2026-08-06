@@ -195,3 +195,15 @@ function errorText(err, withStack) {
   if (withStack) return String(err.stack || err.message || err);
   return String(err.message || err);
 }
+
+// Exported for the Node test harness; ignored by Apps Script, where `module`
+// is undefined and every top-level function is already global.
+if (typeof module !== 'undefined') {
+  module.exports = Object.assign(module.exports || {}, {
+    ALERT_THROTTLE_MS: ALERT_THROTTLE_MS,
+    RETRY_INSTRUCTIONS: RETRY_INSTRUCTIONS,
+    tryAlert: tryAlert,
+    reportRunFailed: reportRunFailed,
+    errorText: errorText,
+  });
+}

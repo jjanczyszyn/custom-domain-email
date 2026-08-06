@@ -47,14 +47,18 @@ function relayTick() {
     return;
   }
 
-  // Loaded outside the try so the failure path can throttle its own alerts.
-  // loadState never throws; getConfig does, and used to leave the catch with no
-  // state to record that it had already emailed about this.
-  var props = PropertiesService.getScriptProperties();
-  var snapshot = props.getProperties(); // one remote read serves config and state
-  var state = loadState(snapshot);
+  // Declared out here so the failure path can see them, but assigned INSIDE the
+  // try: everything that can throw belongs under the catch, or the failure is
+  // silent. They stay null until genuinely loaded, because a null state must
+  // never be mistaken for an empty one — saveState would then write empty
+  // buckets over the consumed markers, and consumed is what stops a resend.
+  var props = null;
+  var state = null;
 
   try {
+    props = PropertiesService.getScriptProperties();
+    var snapshot = props.getProperties(); // one remote read serves config and state
+    state = loadState(snapshot);
     var cfg = getConfig(snapshot);
 
     reconcileInflight(props, state);
@@ -107,16 +111,12 @@ function relayTick() {
     // alert is throttled. Unthrottled it would send the same mail 1,440 times a
     // day, which both buries the mailbox and burns the 100-recipients-a-day
     // sending quota that the per-draft alerts actually need.
+    // reportRunFailed persists its own throttle marker, and tolerates a null
+    // state by alerting without throttling — which is the right way round: an
+    // unthrottled alert is noisy, a missing one is invisible.
     console.error(errorText(err, true));
     reportRunFailed(err, state, props);
   } finally {
-    // Persist whatever the failure path recorded — the throttle marker is only
-    // useful if it survives the tick that set it.
-    try {
-      saveState(props, state);
-    } catch (e) {
-      console.error('could not persist state after a failed run: ' + errorText(e));
-    }
     lock.releaseLock();
   }
 }
