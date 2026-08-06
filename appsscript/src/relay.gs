@@ -256,13 +256,26 @@ function fetchRawDraft(draftId) {
     );
   }
 
-  // base64DecodeWebSafe rejects unpadded input, which is exactly what the Gmail
-  // API returns. Try it anyway, then fall back to normalised standard base64.
+  var raw = res.message.raw;
+
+  // Apps Script's advanced services return protobuf `bytes` fields as Blob
+  // objects, not as the base64 strings the REST API documents. Handing a Blob
+  // to a base64 decoder fails with "Could not decode string", which points
+  // nowhere near the actual cause.
+  if (raw && typeof raw.getDataAsString === 'function') {
+    return raw.getDataAsString('UTF-8');
+  }
+  if (raw && typeof raw.getBytes === 'function') {
+    return Utilities.newBlob(raw.getBytes()).getDataAsString('UTF-8');
+  }
+
+  // Otherwise it is a base64url string. base64DecodeWebSafe rejects unpadded
+  // input, which is what Gmail returns, so fall back to padded standard base64.
   var bytes;
   try {
-    bytes = Utilities.base64DecodeWebSafe(res.message.raw);
+    bytes = Utilities.base64DecodeWebSafe(String(raw));
   } catch (e) {
-    bytes = Utilities.base64Decode(normalizeBase64(res.message.raw));
+    bytes = Utilities.base64Decode(normalizeBase64(raw));
   }
   return Utilities.newBlob(bytes).getDataAsString('UTF-8');
 }

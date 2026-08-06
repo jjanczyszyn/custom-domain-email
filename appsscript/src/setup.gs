@@ -84,6 +84,57 @@ function sendTestEmail() {
 }
 
 /**
+ * Report what Gmail actually returns for your marked drafts, without sending
+ * anything. Run this when a draft fails to decode — it names the type the API
+ * handed back, which is the thing worth knowing and the thing an exception
+ * message hides.
+ */
+function inspectDrafts() {
+  var cfg = getConfig();
+  var drafts = GmailApp.getDrafts();
+  console.log('Found ' + drafts.length + ' draft(s) in total.');
+
+  for (var i = 0; i < drafts.length; i++) {
+    var id, subject;
+    try {
+      id = drafts[i].getId();
+      subject = drafts[i].getMessage().getSubject() || '(no subject)';
+    } catch (e) {
+      console.log('- [unreadable draft] ' + (e.message || e));
+      continue;
+    }
+
+    var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart, cfg.subjectToken);
+    if (!token.marked) continue; // only report what the relay would act on
+
+    var res, raw;
+    try {
+      res = Gmail.Users.Drafts.get('me', id, { format: 'raw' });
+      raw = res && res.message ? res.message.raw : undefined;
+    } catch (e) {
+      console.log('- "' + subject + '": Drafts.get failed — ' + (e.message || e));
+      continue;
+    }
+
+    console.log(
+      '- "' + subject + '"\n' +
+        '    typeof raw:        ' + typeof raw + '\n' +
+        '    is Blob:           ' + !!(raw && typeof raw.getDataAsString === 'function') + '\n' +
+        '    has getBytes:      ' + !!(raw && typeof raw.getBytes === 'function') + '\n' +
+        '    length (if string): ' + (typeof raw === 'string' ? raw.length : 'n/a')
+    );
+
+    try {
+      var decoded = fetchRawDraft(id);
+      console.log('    decoded OK, ' + decoded.length + ' chars, starts: ' +
+        decoded.slice(0, 60).replace(/\r?\n/g, ' | '));
+    } catch (e) {
+      console.log('    decode FAILED — ' + (e.message || e));
+    }
+  }
+}
+
+/**
  * Clear every in-flight and consumed marker.
  *
  * Only for recovering from a wedged state during setup. Clearing a consumed
