@@ -26,7 +26,7 @@ function setUp() {
       '  Default alias: ' + cfg.defaultLocalpart + '@<domain>\n' +
       '  Region:       ' + cfg.region + '\n' +
       '  Alerts to:    ' + cfg.alertEmail + '\n\n' +
-      'Mark a draft with the "' + LABEL_OUTBOX + '" label or a ">>" subject ' +
+      'Mark a draft with the "' + LABEL_OUTBOX + '" label or a "' + cfg.subjectToken + '" subject ' +
       'prefix to send it. Run checkAws() to confirm AWS credentials work.'
   );
 }
@@ -67,7 +67,7 @@ function checkAws() {
 function sendTestEmail() {
   var cfg = getConfig();
   var alias = cfg.defaultLocalpart + '@' + cfg.domains[0];
-  var messageId = '<' + Utilities.getUuid() + '@' + cfg.domains[0] + '>';
+  var messageId = newMessageId(alias);
 
   var raw = [
     'From: ' + alias,
@@ -100,7 +100,7 @@ function inspectDrafts() {
       id = drafts[i].getId();
       subject = drafts[i].getMessage().getSubject() || '(no subject)';
     } catch (e) {
-      console.log('- [unreadable draft] ' + (e.message || e));
+      console.log('- [unreadable draft] ' + errorText(e));
       continue;
     }
 
@@ -112,45 +112,60 @@ function inspectDrafts() {
       res = Gmail.Users.Drafts.get('me', id, { format: 'raw' });
       raw = res && res.message ? res.message.raw : undefined;
     } catch (e) {
-      console.log('- "' + subject + '": Drafts.get failed — ' + (e.message || e));
+      console.log('- "' + subject + '": Drafts.get failed — ' + errorText(e));
       continue;
     }
 
-    console.log(
-      '- "' + subject + '"\n' +
-        '    typeof raw:        ' + typeof raw + '\n' +
-        '    is Blob:           ' + !!(raw && typeof raw.getDataAsString === 'function') + '\n' +
-        '    has getBytes:      ' + !!(raw && typeof raw.getBytes === 'function') + '\n' +
-        '    length (if string): ' + (typeof raw === 'string' ? raw.length : 'n/a')
-    );
+    // The same probe the decoder's own error path uses, so this diagnostic
+    // cannot drift from the code it exists to explain.
+    console.log('- "' + subject + '"\n    ' + describeRawPayload(raw));
 
     try {
       var decoded = fetchRawDraft(id);
       console.log('    decoded OK, ' + decoded.length + ' chars, starts: ' +
         decoded.slice(0, 60).replace(/\r?\n/g, ' | '));
     } catch (e) {
-      console.log('    decode FAILED — ' + (e.message || e));
+      console.log('    decode FAILED — ' + errorText(e));
     }
   }
 }
 
 /**
- * Clear every in-flight and consumed marker.
+ * Forget everything the relay knows about past sends.
  *
- * Only for recovering from a wedged state during setup. Clearing a consumed
- * marker makes its draft eligible again, so a draft that already went out
- * would be sent a second time — check Sent before running this.
+ * Only for recovering from a wedged state. Clearing the `consumed` bucket makes
+ * its drafts eligible again, so anything that already went out would be sent a
+ * SECOND time — check your Sent folder before running this.
+ *
+ * Expressed through loadState/saveState so exactly one place knows the storage
+ * shape; an earlier version hard-coded the layout and silently cleared nothing
+ * once that layout changed.
  */
-function resetMarkers() {
+function clearRelayState() {
   var props = PropertiesService.getScriptProperties();
   var all = props.getProperties();
-  var cleared = 0;
+
+  var before = loadState(all);
+  var counts = [];
+  for (var i = 0; i < STATE_BUCKETS.length; i++) {
+    var bucket = STATE_BUCKETS[i];
+    counts.push(bucket + '=' + Object.keys(before[bucket]).length);
+  }
+  saveState(props, emptyState());
+
+  // An early version wrote one property per draft ("failed:<id>"), which buried
+  // the handful of settings you actually edit. Nothing writes them now, so this
+  // sweep only matters for installs that ran that version.
+  var legacy = 0;
   for (var key in all) {
-    if (!all.hasOwnProperty(key)) continue;
-    if (key.indexOf(PROP_INFLIGHT_PREFIX) === 0 || key.indexOf(PROP_CONSUMED_PREFIX) === 0) {
+    if (all.hasOwnProperty(key) && /^(inflight|consumed|failed):/.test(key)) {
       props.deleteProperty(key);
-      cleared++;
+      legacy++;
     }
   }
-  console.log('Cleared ' + cleared + ' marker(s).');
+
+  console.log(
+    'Cleared relay state (' + counts.join(', ') + ')' +
+    (legacy ? ', and removed ' + legacy + ' obsolete per-draft propert(ies)' : '') + '.'
+  );
 }

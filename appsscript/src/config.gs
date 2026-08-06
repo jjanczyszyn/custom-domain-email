@@ -26,26 +26,27 @@ var PROP_DEFAULT_LOCALPART = 'DEFAULT_LOCALPART';
 var PROP_ALERT_EMAIL = 'ALERT_EMAIL';
 var PROP_METRIC_NAMESPACE = 'METRIC_NAMESPACE';
 var PROP_SETTLE_SECONDS = 'SETTLE_SECONDS';
-var PROP_STALE_MINUTES = 'STALE_MINUTES';
 var PROP_SUBJECT_TOKEN = 'SUBJECT_TOKEN';
 var PROP_DOMAIN_NAMES = 'DOMAIN_NAMES';
 
-/** Read and validate configuration. Throws with a useful message if unusable. */
-function getConfig() {
-  var props = PropertiesService.getScriptProperties();
+/**
+ * Read and validate configuration. Throws with a useful message if unusable.
+ *
+ * Takes an already-fetched property snapshot so a run costs one remote read
+ * rather than one per key; PropertiesService calls are remote, not local.
+ */
+function getConfig(snapshot) {
+  var all = snapshot || PropertiesService.getScriptProperties().getProperties();
   var get = function (key, fallback) {
-    var v = props.getProperty(key);
-    return v === null || v === '' ? fallback : v;
+    var v = all[key];
+    return v === undefined || v === null || v === '' ? fallback : v;
   };
 
   var cfg = {
     accessKey: get(PROP_ACCESS_KEY, ''),
     secretKey: get(PROP_SECRET_KEY, ''),
     region: get(PROP_REGION, 'us-east-1'),
-    domains: get(PROP_DOMAINS, '')
-      .split(',')
-      .map(function (d) { return d.trim(); })
-      .filter(function (d) { return d.length > 0; }),
+    domains: parseDomainList(get(PROP_DOMAINS, '')),
     defaultLocalpart: get(PROP_DEFAULT_LOCALPART, 'hello'),
 
     // Per-domain sender names, so recipients see the brand rather than the
@@ -54,16 +55,15 @@ function getConfig() {
     alertEmail: get(PROP_ALERT_EMAIL, ''),
     metricNamespace: get(PROP_METRIC_NAMESPACE, 'EmailForwarder'),
     settleSeconds: parseInt(get(PROP_SETTLE_SECONDS, '45'), 10),
-    staleMinutes: parseInt(get(PROP_STALE_MINUTES, '15'), 10),
 
     // Set the SUBJECT_TOKEN property to an empty string to switch the subject
-    // marker off, making the SES/Outbox label the only way to send. Note the
-    // deliberate use of getProperty directly: `get()` treats '' as unset and
-    // would hand back the default, which is exactly the opposite of intent.
+    // marker off, making the SES/Outbox label the only way to send. Read
+    // directly rather than through get(), which treats '' as unset and would
+    // hand back the default — exactly the opposite of the intent.
     subjectToken:
-      props.getProperty(PROP_SUBJECT_TOKEN) === null
+      all[PROP_SUBJECT_TOKEN] === undefined || all[PROP_SUBJECT_TOKEN] === null
         ? DEFAULT_SUBJECT_TOKEN
-        : props.getProperty(PROP_SUBJECT_TOKEN),
+        : all[PROP_SUBJECT_TOKEN],
   };
 
   var missing = [];

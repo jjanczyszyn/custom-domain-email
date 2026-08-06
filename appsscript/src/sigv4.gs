@@ -39,20 +39,19 @@ function sigv4Timestamps(date) {
  * name — the ordering is part of what gets signed.
  */
 function canonicalRequest(crypto, req) {
+  var byLowerName = {};
   var names = [];
-  for (var k in req.headers) if (req.headers.hasOwnProperty(k)) names.push(k.toLowerCase());
+  for (var k in req.headers) {
+    if (!req.headers.hasOwnProperty(k)) continue;
+    var lower = k.toLowerCase();
+    byLowerName[lower] = String(req.headers[k]);
+    names.push(lower);
+  }
   names.sort();
 
   var canonicalHeaders = '';
   for (var i = 0; i < names.length; i++) {
-    var value;
-    for (var orig in req.headers) {
-      if (req.headers.hasOwnProperty(orig) && orig.toLowerCase() === names[i]) {
-        value = String(req.headers[orig]);
-        break;
-      }
-    }
-    canonicalHeaders += names[i] + ':' + value.trim().replace(/\s+/g, ' ') + '\n';
+    canonicalHeaders += names[i] + ':' + byLowerName[names[i]].trim().replace(/\s+/g, ' ') + '\n';
   }
 
   var signedHeaders = names.join(';');

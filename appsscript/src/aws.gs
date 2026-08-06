@@ -122,7 +122,7 @@ function sesSendRaw(cfg, fromAddress, recipients, rawMessage) {
  *
  * Never throws: a monitoring failure must not stop mail going out.
  */
-function putRelayHeartbeat(cfg, sentCount, staleCount) {
+function putRelayHeartbeat(cfg, sentCount) {
   try {
     var params = [
       'Action=PutMetricData',
@@ -134,9 +134,6 @@ function putRelayHeartbeat(cfg, sentCount, staleCount) {
       'MetricData.member.2.MetricName=RelaySent',
       'MetricData.member.2.Value=' + sentCount,
       'MetricData.member.2.Unit=Count',
-      'MetricData.member.3.MetricName=RelayStuckDrafts',
-      'MetricData.member.3.Value=' + staleCount,
-      'MetricData.member.3.Unit=Count',
     ].join('&');
 
     awsFetch(
@@ -148,6 +145,6 @@ function putRelayHeartbeat(cfg, sentCount, staleCount) {
       'application/x-www-form-urlencoded; charset=utf-8'
     );
   } catch (e) {
-    console.warn('heartbeat failed: ' + e.message);
+    console.warn('heartbeat failed: ' + errorText(e));
   }
 }

@@ -81,6 +81,14 @@ function fromHeaderValue(originalFrom, address, displayName) {
   return '"' + name.replace(/"/g, '') + '" <' + address + '>';
 }
 
+/** Parse the DOMAINS property: "example.com, example.net" -> array. */
+function parseDomainList(value) {
+  return String(value || '')
+    .split(',')
+    .map(function (d) { return d.trim(); })
+    .filter(function (d) { return d.length > 0; });
+}
+
 /**
  * Parse the DOMAIN_NAMES property: "example.com=Example Co,example.net=Ex Net".
  * Keys are lowercased so lookups are case-insensitive.
@@ -297,9 +305,40 @@ function repairHtmlParts(raw) {
   var segments = String(raw).split(/(\r?\n--[^\r\n]*(?:\r?\n|$))/);
   for (var i = 0; i < segments.length; i++) {
     if (/^\r?\n--/.test(segments[i])) continue; // a boundary, not content
+
+    // Base64 attachments can be megabytes and can never contain HTML; scanning
+    // them is pure waste on a path that runs for every send.
+    if (/Content-Transfer-Encoding:\s*base64/i.test(segments[i].slice(0, 500))) continue;
+
     segments[i] = fixStrayClosingTags(segments[i]);
   }
   return segments.join('');
+}
+
+/**
+ * The Message-IDs a reply cites, newest first.
+ *
+ * In-Reply-To names the immediate parent; References is the chain, oldest
+ * first. Newest is the strongest evidence of which conversation this answers,
+ * so the chain is reversed and the direct parent leads.
+ */
+function messageIdReferences(header) {
+  var inReplyTo = readHeader(header, 'In-Reply-To');
+  var references = readHeader(header, 'References');
+  var out = [];
+  var seen = {};
+
+  var ordered = (inReplyTo.match(/<[^>]+>/g) || [])
+    .concat((references.match(/<[^>]+>/g) || []).reverse());
+
+  for (var i = 0; i < ordered.length; i++) {
+    var id = ordered[i].replace(/^</, '').replace(/>$/, '');
+    if (id && !seen[id]) {
+      seen[id] = true;
+      out.push(id);
+    }
+  }
+  return out;
 }
 
 /**
@@ -431,7 +470,9 @@ if (typeof module !== 'undefined') {
     parseSubjectToken: parseSubjectToken,
     resolveAlias: resolveAlias,
     inferAlias: inferAlias,
+    parseDomainList: parseDomainList,
     parseDomainNames: parseDomainNames,
+    messageIdReferences: messageIdReferences,
     displayNameFor: displayNameFor,
     fixStrayClosingTags: fixStrayClosingTags,
     repairHtmlParts: repairHtmlParts,

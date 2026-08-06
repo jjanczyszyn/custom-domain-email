@@ -22,17 +22,22 @@ clear the outbox marker — Apps Script's 6-minute execution ceiling, a Google
 infrastructure blip, a quota trip. One minute later the trigger fires again,
 finds the draft still marked, and sends it again. And again.
 
-**Mitigation — clear the marker *before* calling SES.** `relay.gs` removes the
-outbox label and strips the subject token as its first action on a draft, and
-only then builds and transmits. A crash at any point after that leaves a draft
-that is no longer eligible, so the next run ignores it. The failure mode
-inverts from "sends repeatedly" to "silently doesn't send", which item 3 then
-catches.
+**Mitigation — record the draft as consumed *before* calling SES.**
+`processDraft()` writes a `consumed` entry and persists it, and only then
+transmits. A crash at any point after that leaves a draft that is no longer
+eligible, so the next run ignores it. The failure mode inverts from "sends
+repeatedly" to "silently doesn't send", which item 3 then catches.
 
-**Mitigation — an explicit in-flight record.** Before the SES call the script
-writes `inflight:<draftId>` to Script Properties with the generated
-Message-ID; after a confirmed response it deletes that record. A record still
-present on the next run means a send whose outcome is *unknown*.
+**Mitigation — an explicit in-flight record.** Alongside `consumed`, an
+`inflight` entry carries the generated Message-ID; it is cleared only after the
+message is filed and the draft deleted. A record still present on the next run
+means a send whose outcome is *unknown*. Both live in the single `_relayState`
+property — see `state.gs` for why one key rather than one per draft.
+
+**Corollary — a failure *after* SES accepts must not clear `consumed`.** If
+filing the Sent copy throws, the message has still gone out; clearing the marker
+would send it again. `processDraft()` tracks whether SES accepted and routes
+those two cases to different outcomes in `notify.gs`.
 
 **Policy: never auto-retry an unknown-state send.** We cannot ask SES "did you
 accept this message". So an orphaned in-flight record does not trigger a retry
@@ -74,9 +79,14 @@ which already runs hourly and already checks `CanaryHeartbeat`, also checks
 that the relay has reported in within its window — and emails you when it has
 not. If Apps Script dies entirely, AWS notices.
 
-**Mitigation — a stale-draft sweep.** Each run also counts drafts that have
-carried the outbox marker for more than 15 minutes and reports them, catching
-the case where the trigger runs but individual sends keep failing.
+~~**Mitigation — a stale-draft sweep.**~~ *Superseded, and removed.* This was
+going to count drafts left marked for more than fifteen minutes. It became
+redundant once an unresolvable draft started reporting itself on the first tick
+(item 8): a marked draft now either sends, fails loudly, or is inside its
+settling window, so there is no silent limbo left for a sweep to find. It was
+carried for a while as unreachable code publishing a CloudWatch metric that was
+always zero — a monitoring signal that reads "healthy" by construction is worse
+than no signal, so both are gone.
 
 ## 4. Replies stopped threading and every conversation fragmented
 
@@ -146,8 +156,9 @@ every draft is authored as the Gmail address. Something must decide which of
 the four domains a message goes out as, and picking wrong means a client sees
 the wrong brand.
 
-**Mitigation — infer, then allow explicit override, then refuse.** For a reply,
-the alias is inferred from the domain the thread was originally addressed to,
+**Mitigation — explicit intent first, then evidence, then refuse.** An explicit
+subject token or `SES/from:` label wins outright. Failing that, the alias is
+inferred from the domain the thread was originally addressed to,
 which is the same rule as Gmail's "reply from the same address" setting. For a
 new message it must be stated explicitly, via the `SES/from:<domain>` label or
 the subject token (`>>example.net Subject here`). If neither is available the

@@ -104,6 +104,43 @@ const NAMES = {
   "example.net": "Ex Net",
 };
 
+test("parseDomainList: trims, drops blanks, tolerates junk input", () => {
+  assert.deepEqual(gs.parseDomainList("example.com, example.net"), ["example.com", "example.net"]);
+  assert.deepEqual(gs.parseDomainList(" a.com ,, b.com,"), ["a.com", "b.com"]);
+  assert.deepEqual(gs.parseDomainList(""), []);
+  assert.deepEqual(gs.parseDomainList(null), []);
+});
+
+test("messageIdReferences: the immediate parent leads, then newest references", () => {
+  const header =
+    "In-Reply-To: <parent@x.com>\r\n" +
+    "References: <oldest@x.com> <middle@x.com> <parent@x.com>\r\n";
+  // Brackets stripped, In-Reply-To first, References reversed, no duplicates.
+  assert.deepEqual(gs.messageIdReferences(header), [
+    "parent@x.com",
+    "middle@x.com",
+    "oldest@x.com",
+  ]);
+});
+
+test("messageIdReferences: works with either header alone, or neither", () => {
+  assert.deepEqual(gs.messageIdReferences("In-Reply-To: <a@x.com>\r\n"), ["a@x.com"]);
+  assert.deepEqual(gs.messageIdReferences("References: <a@x.com> <b@x.com>\r\n"), [
+    "b@x.com",
+    "a@x.com",
+  ]);
+  assert.deepEqual(gs.messageIdReferences("Subject: hi\r\n"), []);
+});
+
+test("repairHtmlParts: base64 attachment parts are skipped, not scanned", () => {
+  const attachment =
+    "\r\n--b\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+    "iVBORw0KGgo=</html>oddbutbase64\r\n";
+  const raw = "\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n" + attachment + "\r\n--b--\r\n";
+  // Untouched: rewriting inside an attachment payload would corrupt it.
+  assert.equal(gs.repairHtmlParts(raw), raw);
+});
+
 test("parseDomainNames: parses pairs and lowercases the domain key", () => {
   const map = gs.parseDomainNames("Example.COM=Example Co, example.net=Ex Net");
   assert.equal(map["example.com"], "Example Co");

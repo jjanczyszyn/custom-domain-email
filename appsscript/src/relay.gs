@@ -1,90 +1,16 @@
 /**
- * relay.gs — the orchestration shell.
+ * relay.gs — the orchestration.
  *
- * Runs once a minute on a time-driven trigger. Finds marked drafts, hands them
- * to SES as one of our verified domains, and files the result in Sent.
+ * Runs once a minute on a time-driven trigger: find the drafts you marked, hand
+ * them to SES as one of your verified domains, file the result in Sent.
  *
- * Every step here exists to close a specific item in docs/relay-premortem.md;
- * the item number is named at each one. The pure logic it leans on lives in
- * mime.gs and sigv4.gs and is unit-tested under Node.
+ * The supporting parts live next door — state.gs (what has already happened),
+ * inference.gs (which domain to send as), gmail.gs (Gmail I/O), notify.gs (how
+ * failures reach you), and the pure, Node-tested mime.gs and sigv4.gs. This
+ * file holds only the decisions.
+ *
+ * Each step closes a numbered item in docs/relay-premortem.md, named inline.
  */
-
-// Legacy per-draft marker keys. Kept only so loadState can absorb and remove
-// any left over from before all state moved into a single property.
-var PROP_INFLIGHT_PREFIX = 'inflight:';
-var PROP_CONSUMED_PREFIX = 'consumed:';
-var PROP_FAILED_PREFIX = 'failed:';
-
-// All runtime state lives under one key. Script Properties is the same surface
-// that holds your credentials and configuration, so scattering a marker per
-// draft across it buries the settings you actually edit. The leading underscore
-// marks it as internal.
-var PROP_STATE = '_relayState';
-var STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Read the state bundle, absorbing any legacy per-draft keys and deleting them.
- * The migration is a no-op once it has run.
- */
-function loadState(props) {
-  var state = { inflight: {}, consumed: {}, failed: {} };
-
-  var raw = props.getProperty(PROP_STATE);
-  if (raw) {
-    try {
-      var parsed = JSON.parse(raw);
-      state.inflight = parsed.inflight || {};
-      state.consumed = parsed.consumed || {};
-      state.failed = parsed.failed || {};
-    } catch (e) {
-      console.warn('relay state was unreadable; starting fresh');
-    }
-  }
-
-  var all = props.getProperties();
-  var migrated = 0;
-  for (var key in all) {
-    if (!all.hasOwnProperty(key)) continue;
-    var bucket = null;
-    var prefix = '';
-    if (key.indexOf(PROP_INFLIGHT_PREFIX) === 0) { bucket = state.inflight; prefix = PROP_INFLIGHT_PREFIX; }
-    else if (key.indexOf(PROP_CONSUMED_PREFIX) === 0) { bucket = state.consumed; prefix = PROP_CONSUMED_PREFIX; }
-    else if (key.indexOf(PROP_FAILED_PREFIX) === 0) { bucket = state.failed; prefix = PROP_FAILED_PREFIX; }
-    if (!bucket) continue;
-
-    var id = key.slice(prefix.length);
-    var value;
-    try {
-      value = JSON.parse(all[key]);
-    } catch (e) {
-      value = { at: parseInt(all[key], 10) || 0 };
-    }
-    bucket[id] = value;
-    props.deleteProperty(key);
-    migrated++;
-  }
-  if (migrated) console.log('migrated ' + migrated + ' legacy marker(s) into ' + PROP_STATE);
-
-  return state;
-}
-
-function saveState(props, state) {
-  props.setProperty(PROP_STATE, JSON.stringify(state));
-}
-
-/** Drop entries older than the TTL so the bundle cannot grow without bound. */
-function pruneState(state) {
-  var cutoff = new Date().getTime() - STATE_TTL_MS;
-  var buckets = ['inflight', 'consumed', 'failed'];
-  for (var b = 0; b < buckets.length; b++) {
-    var bucket = state[buckets[b]];
-    for (var id in bucket) {
-      if (!bucket.hasOwnProperty(id)) continue;
-      var at = bucket[id] && bucket[id].at;
-      if (!at || at < cutoff) delete bucket[id];
-    }
-  }
-}
 
 /** Trigger entry point. */
 function relayTick() {
@@ -97,14 +23,17 @@ function relayTick() {
   }
 
   try {
-    var cfg = getConfig();
     var props = PropertiesService.getScriptProperties();
-    var state = loadState(props);
 
-    reconcileInflight(cfg, props, state);
+    // One remote read serves both configuration and state.
+    var snapshot = props.getProperties();
+    var cfg = getConfig(snapshot);
+    var state = loadState(snapshot);
+    var before = snapshot[PROP_STATE] || '';
+
+    reconcileInflight(props, state);
 
     var sent = 0;
-    var stale = 0;
     var unreadable = 0;
     var drafts = GmailApp.getDrafts();
 
@@ -119,16 +48,14 @@ function relayTick() {
         // whole run, so a single unrelated draft sitting in the mailbox would
         // silently stop all outbound mail. Skip it and keep going.
         unreadable++;
-        console.warn('skipping unreadable draft: ' + (e.message || e));
+        console.warn('skipping unreadable draft: ' + errorText(e));
         continue;
       }
 
       if (decision.action === 'send') {
         if (processDraft(drafts[i], decision, cfg, props, state)) sent++;
       } else if (decision.action === 'fail') {
-        handleFailure(drafts[i], decision, cfg, new Error(decision.reason), state);
-      } else if (decision.action === 'defer' && decision.stale) {
-        stale++;
+        reportNotSent(drafts[i], decision, new Error(decision.reason), state, props);
       }
     }
 
@@ -136,23 +63,26 @@ function relayTick() {
       console.log('skipped ' + unreadable + ' unreadable draft(s) of ' + drafts.length);
     }
 
-    if (stale > 0) reportStuckDrafts(cfg, stale);
+    // Premortem 3: the heartbeat is what proves this ran at all. A watchdog
+    // outside Apps Script reads it, because one inside cannot report its death.
+    putRelayHeartbeat(cfg, sent);
 
-    // Premortem 3: the heartbeat is what proves this ran at all.
-    putRelayHeartbeat(cfg, sent, stale);
     pruneState(state);
-    saveState(props, state);
+    // Only write when something actually changed: an idle mailbox would
+    // otherwise cost a remote write every minute, forever.
+    var after = JSON.stringify(state);
+    if (after !== before) props.setProperty(PROP_STATE, after);
   } catch (err) {
     // A configuration or Gmail-level failure would otherwise be silent.
-    console.error(err.stack || err.message);
-    tryAlert('Relay run failed', String(err.stack || err.message));
+    console.error(errorText(err, true));
+    tryAlert('Relay run failed', errorText(err, true));
   } finally {
     lock.releaseLock();
   }
 }
 
 /**
- * Decide what to do with one draft.
+ * Decide what to do with one draft: send it, refuse it, or leave it alone.
  *
  * Premortem 9: two independent markers. A label works on the web; a subject
  * token works anywhere text can be typed, including mobile compose where
@@ -161,34 +91,24 @@ function relayTick() {
 function classifyDraft(draft, cfg, state) {
   var id = draft.getId();
 
-  // Already handled — or handled and then interrupted. Either way, not ours.
-  if (state.consumed[id]) return { action: 'skip' };
-  if (state.inflight[id]) return { action: 'skip' };
+  // Cheapest checks first, before any Gmail call. `consumed` is the resend
+  // guard; `inflight` is cleared by reconcileInflight before we get here, so a
+  // surviving entry means that reconciliation itself could not finish.
+  if (state.consumed[id] || state.inflight[id]) return { action: 'skip' };
 
   var message = draft.getMessage();
   var subject = message.getSubject() || '';
   var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart, cfg.subjectToken);
 
-  var thread = null;
-  var labelNames = [];
-  try {
-    thread = message.getThread();
-    var labels = thread.getLabels();
-    for (var i = 0; i < labels.length; i++) labelNames.push(labels[i].getName());
-  } catch (e) {
-    // A draft with no thread context is still sendable via the subject token.
-  }
-
-  var labelled = labelNames.indexOf(LABEL_OUTBOX) !== -1;
+  var context = threadContext(message);
+  var labelled = context.labelNames.indexOf(LABEL_OUTBOX) !== -1;
   if (!labelled && !token.marked) return { action: 'skip' };
 
-  // A draft that already failed is not retried on its own. Without this, a
-  // permanent failure (bad recipient, oversize) retries every single minute and
-  // emails on each attempt — three alerts in ninety seconds, forever.
-  //
-  // Retrying is therefore an explicit act, and there are two ways to signal it,
-  // so that a subject-token workflow is not forced to reach for a label:
-  // re-apply the outbox label, or simply edit the draft.
+  // A draft that already failed is not retried on its own — without this, a
+  // permanent failure retries every minute and emails on each attempt.
+  // Retrying is therefore a deliberate gesture, and either of the two available
+  // ones counts, so a subject-token workflow is never forced to reach for a
+  // label (which is awkward on mobile, the reason the token exists).
   var failed = state.failed[id];
   if (failed) {
     var editedSince = failed.draftDate && message.getDate().getTime() > failed.draftDate;
@@ -198,463 +118,124 @@ function classifyDraft(draft, cfg, state) {
 
   // Premortem 5: never send a draft that is still being typed. This doubles as
   // the undo window — unmark within it and nothing goes out.
-  var ageMs = new Date().getTime() - message.getDate().getTime();
-  if (ageMs < cfg.settleSeconds * 1000) {
-    return { action: 'defer', stale: false };
+  if (new Date().getTime() - message.getDate().getTime() < cfg.settleSeconds * 1000) {
+    return { action: 'skip' };
   }
 
-  // Premortem 8: infer the alias, allow an explicit override, otherwise refuse.
-  var diag = [];
-  var alias = token.alias || aliasFromLabels(labelNames, cfg);
-  if (!alias && thread) {
-    var threadCandidates = threadRecipients(thread);
-    diag.push('thread ' + thread.getId() + ' has ' + thread.getMessageCount() + ' message(s)');
-    diag.push('thread recipients: ' + (threadCandidates.join(', ') || '(none)'));
-    alias = inferAlias(threadCandidates, cfg.domains, cfg.defaultLocalpart);
-  } else if (!alias) {
-    diag.push('the draft has no thread');
-  }
+  // Premortem 8: work out which domain, and refuse rather than guess.
+  var ctx = aliasContext(id, token, context.labelNames, context.thread, cfg);
+  var alias = resolveSendAlias(ctx);
 
-  // Gmail does not always put a reply in the same thread as the message it
-  // answers — compose on mobile, or reply to forwarded mail, and the draft can
-  // land in a thread of its own. The thread then holds nothing to infer from
-  // even though the original was plainly addressed to one of our domains.
-  // The reply headers are authoritative where Gmail's threading is not.
-  if (!alias) alias = aliasFromReplyHeaders(id, cfg, diag);
-
-  // A draft that names no resolvable domain will never resolve one by itself —
-  // waiting is pointless and, worse, silent. Treat it as a failure now, so you
-  // get told once and immediately rather than discovering nothing sent.
-  if (!alias) {
-    return {
-      action: 'fail',
-      subject: token.marked ? token.subject : subject,
-      thread: thread,
-      reason:
-        'Could not tell which domain to send as. This is a new message, or a ' +
-        'reply in a thread with no address on your domains, so there is ' +
-        'nothing to infer from.\n\n' +
-        'Name the domain in the subject — ">>' + (cfg.domains[0] || 'yourdomain') +
-        ' Your subject" — or add a "' + LABEL_FROM_PREFIX + '<domain>" label. ' +
-        'Editing the draft is enough to make the relay try again.\n\n' +
-        'What was examined:\n  ' + diag.join('\n  '),
-    };
-  }
-
-  return {
-    action: 'send',
-    alias: alias,
+  var common = {
     subject: token.marked ? token.subject : subject,
-    thread: thread,
-    labelled: labelled,
+    thread: context.thread,
+    diagnostic: ctx.diag.join('\n  '),
   };
-}
 
-/** An explicit SES/from:<domain> label wins over inference. */
-function aliasFromLabels(labelNames, cfg) {
-  for (var i = 0; i < labelNames.length; i++) {
-    if (labelNames[i].indexOf(LABEL_FROM_PREFIX) === 0) {
-      var candidate = labelNames[i].slice(LABEL_FROM_PREFIX.length);
-      var alias = resolveAlias(candidate, cfg.domains, cfg.defaultLocalpart);
-      if (alias) return alias;
-    }
+  if (!alias) {
+    common.action = 'fail';
+    common.reason =
+      'Could not tell which domain to send as. This is a new message, or a ' +
+      'reply in a thread with no address on your domains, so there is nothing ' +
+      'to infer from.\n\nName the domain in the subject — ">>' +
+      (cfg.domains[0] || 'yourdomain') + ' Your subject" — or add a "' +
+      LABEL_FROM_PREFIX + '<domain>" label.';
+    return common;
   }
-  return null;
+
+  common.action = 'send';
+  common.alias = alias;
+  common.labelled = labelled;
+  return common;
 }
 
 /**
- * Infer the alias by following the draft's own In-Reply-To / References back to
- * the message being answered, and reading who that was addressed to.
- *
- * Used when Gmail's threading does not connect the reply to its parent. Only
- * runs after thread inference has already come up empty, since it costs a raw
- * fetch and a search per draft.
+ * Build and validate the outgoing message. Throws with a message written for
+ * the person who has to fix the draft, since that is what reaches them.
  */
-function aliasFromReplyHeaders(draftId, cfg, diag) {
-  try {
-    var header = splitMime(fetchRawDraft(draftId)).header;
-    var inReplyTo = readHeader(header, 'In-Reply-To');
-    var references = readHeader(header, 'References');
-    diag.push('In-Reply-To: ' + (inReplyTo || '(none)'));
-    diag.push('References: ' + (references || '(none)'));
+function prepareOutbound(draftId, decision, cfg, messageId) {
+  var built = buildOutbound(fetchRawDraft(draftId), {
+    from: decision.alias,
+    messageId: messageId,
+    subject: decision.subject,
+    domainNames: cfg.domainNames,
+  });
 
-    // Some clients only record the parent in the body's quote, not in headers.
-    // Fall back to the draft's own To/Cc, which at least names the conversation.
-    var refs = (inReplyTo + ' ' + references).match(/<[^>]+>/g) || [];
-    if (!refs.length) {
-      var own = collectRecipients(header);
-      diag.push('draft To/Cc: ' + own.to.concat(own.cc).join(', ') || '(none)');
-      var fromOwn = inferAlias(own.to.concat(own.cc), cfg.domains, cfg.defaultLocalpart);
-      if (fromOwn) {
-        diag.push('resolved from the draft\'s own recipients');
-        return fromOwn;
-      }
-    }
-
-    // Newest reference first: the immediate parent is the best evidence of
-    // which of our addresses this conversation actually reached.
-    for (var i = refs.length - 1; i >= 0; i--) {
-      var id = refs[i].replace(/^</, '').replace(/>$/, '');
-      var threads = GmailApp.search('rfc822msgid:' + id, 0, 1);
-      diag.push('lookup ' + id + ' -> ' + (threads.length ? 'found' : 'not found'));
-      if (!threads.length) continue;
-      var candidates = threadRecipients(threads[0]);
-      diag.push('  parent recipients: ' + (candidates.join(', ') || '(none)'));
-      var alias = inferAlias(candidates, cfg.domains, cfg.defaultLocalpart);
-      if (alias) return alias;
-    }
-
-    // Last resort: the quoted attribution line. When Gmail records no reply
-    // headers and no thread, the body is the only remaining evidence of which
-    // conversation this answers — "On ..., X <someone@ourdomain> wrote:".
-    var body = splitMime(fetchRawDraft(draftId)).body;
-    var domain = inferDomainFromText(body, cfg.domains);
-    diag.push('quoted body mentions: ' + (domain || '(no domain of ours)'));
-    if (domain) {
-      diag.push('resolved from the quoted body (domain only)');
-      return cfg.defaultLocalpart + '@' + domain;
-    }
-  } catch (e) {
-    diag.push('content inference threw: ' + (e.message || e));
+  var bytes = utf8ByteLength(built.transmit);
+  if (bytes > SES_MAX_RAW_BYTES) {
+    throw new Error(
+      'Message is ' + Math.round(bytes / 1048576) + ' MB; SES will not send ' +
+      'anything over 10 MB. Shrink the attachments.'
+    );
   }
-  return null;
-}
 
-/** Every address the thread was delivered to, newest message first. */
-function threadRecipients(thread) {
-  var out = [];
-  var messages = thread.getMessages();
-  for (var i = messages.length - 1; i >= 0; i--) {
-    var m = messages[i];
-
-    // Skip the draft being sent. Its recipients are who we are writing TO, not
-    // an address this thread was ever delivered to — and since it is the newest
-    // message it would win the inference. Replying to someone at one of our own
-    // domains then went out as *their* address rather than ours.
-    try {
-      if (m.isDraft()) continue;
-    } catch (e) {
-      // isDraft is unavailable on some message states; fall through and use it.
-    }
-
-    var fields = [m.getTo(), m.getCc(), m.getReplyTo()];
-    for (var f = 0; f < fields.length; f++) {
-      if (!fields[f]) continue;
-      var parts = splitAddressList(fields[f]);
-      for (var p = 0; p < parts.length; p++) out.push(parts[p]);
-    }
+  var checked = validateRecipients(built.recipients);
+  if (checked.bad.length) {
+    throw new Error(
+      'These recipients are not valid addresses: ' + checked.bad.join(', ') +
+      '. Nothing was sent — fix them and re-mark the draft.'
+    );
   }
-  return out;
+  if (checked.total === 0) throw new Error('The draft has no recipients.');
+
+  built.checked = checked;
+  return built;
 }
 
 /**
  * Send one draft. Returns true when SES accepted it.
  *
- * The ordering here is the single most important thing in this file. See
- * premortem item 1: the draft is marked consumed BEFORE the network call, so a
- * crash mid-send can never cause a resend, and the in-flight record is cleared
+ * The ordering here is the single most important thing in this file. Premortem
+ * item 1: the draft is marked consumed and persisted BEFORE the network call,
+ * so a crash mid-send can never cause a resend; the in-flight record is cleared
  * LAST, so a crash anywhere in between is detectable rather than silent.
  */
 function processDraft(draft, decision, cfg, props, state) {
   var id = draft.getId();
-  var sent = false;
-  var messageId = '<' + Utilities.getUuid() + '@' + decision.alias.split('@')[1] + '>';
+  var messageId = newMessageId(decision.alias);
+  var accepted = false;
 
   try {
-    var raw = fetchRawDraft(id);
+    var built = prepareOutbound(id, decision, cfg, messageId);
 
-    var built = buildOutbound(raw, {
-      from: decision.alias,
-      messageId: messageId,
-      subject: decision.subject,
-      domainNames: cfg.domainNames,
-    });
-
-    if (isOversize(built.transmit)) {
-      throw new Error(
-        'Message is ' + Math.round(utf8ByteLength(built.transmit) / 1048576) +
-        ' MB; SES will not send anything over 10 MB. Shrink the attachments.'
-      );
-    }
-
-    var checked = validateRecipients(built.recipients);
-    if (checked.bad.length) {
-      throw new Error(
-        'These recipients are not valid addresses: ' + checked.bad.join(', ') +
-        '. Nothing was sent — fix them and re-mark the draft.'
-      );
-    }
-    if (checked.total === 0) throw new Error('The draft has no recipients.');
-
-    // Point of no return. Consumed first, in-flight second, persisted before
-    // the network call so a crash cannot lose them.
+    // Point of no return.
     var now = new Date().getTime();
     state.consumed[id] = { at: now };
     state.inflight[id] = { messageId: messageId, subject: decision.subject, at: now };
     saveState(props, state);
     if (decision.labelled && decision.thread) removeLabel(decision.thread, LABEL_OUTBOX);
 
-    sesSendRaw(cfg, decision.alias, checked.ok, built.transmit);
-    sent = true;
+    sesSendRaw(cfg, decision.alias, built.checked.ok, built.transmit);
+    accepted = true;
 
     archiveToSent(built.archive, decision.thread);
     draft.deleteDraft();
 
     // Both cleared only once the draft is gone, so its id can never come round
-    // again. Cleared last: dying before here leaves the in-flight record, and
-    // the next tick flags it for review rather than guessing.
+    // again. The end-of-tick write persists this.
     delete state.inflight[id];
     delete state.consumed[id];
-    saveState(props, state);
     console.log('sent ' + messageId + ' as ' + decision.alias);
     return true;
   } catch (err) {
-    if (sent) {
-      // SES already accepted this. Filing or deleting failed afterwards, so the
-      // draft may still be sitting there — but clearing `consumed` would make
-      // the next run send it a second time. Keep the marker, keep the draft,
-      // and ask for a human. Premortem item 1: never risk a duplicate.
-      delete state.inflight[id];
-      saveState(props, state);
-      try {
-        if (decision.thread) addLabel(decision.thread, LABEL_REVIEW);
-      } catch (e) {
-        // best effort
-      }
-      tryAlert(
-        'Relay sent but could not finish: ' + (decision.subject || '(no subject)'),
-        'The message WAS accepted by SES and has gone out.\n\n' +
-          'What failed afterwards was filing the copy in Sent or removing the ' +
-          'draft, so the draft may still be in your Drafts folder. It has NOT ' +
-          'been queued to send again — doing so would deliver a duplicate.\n\n' +
-          'Delete the draft by hand once you have checked.\n\n' +
-          'Error:\n' + (err.message || String(err))
+    if (accepted) {
+      // SES already has this message. Filing or deleting failed afterwards, so
+      // the draft may still be sitting there — but clearing `consumed` would
+      // make the next run send it a second time. Keep the marker, keep the
+      // draft, ask for a human.
+      reportNeedsReview(
+        id,
+        { messageId: messageId, subject: decision.subject },
+        errorText(err),
+        state,
+        props
       );
       return true;
     }
 
     delete state.inflight[id];
     delete state.consumed[id];
-    saveState(props, state);
-    handleFailure(draft, decision, cfg, err, state);
+    reportNotSent(draft, decision, err, state, props);
     return false;
-  }
-}
-
-/**
- * The authoritative raw draft, via the advanced Gmail service.
- *
- * GmailApp's own getRawContent() does not reliably expose Bcc, and Bcc has to
- * be visible here so it can be stripped from the transmitted bytes and routed
- * as an API parameter instead (premortem item 2).
- */
-function fetchRawDraft(draftId) {
-  var res = Gmail.Users.Drafts.get('me', draftId, { format: 'raw' });
-
-  // Be explicit about a missing payload. Feeding undefined to the decoder
-  // produces a bare "Could not decode string", which says nothing about the
-  // actual problem — that the API returned no raw content at all.
-  if (!res || !res.message || !res.message.raw) {
-    throw new Error(
-      'Gmail returned no raw content for this draft. If it is a scheduled ' +
-      'send or otherwise unusual, delete it and compose a fresh one.'
-    );
-  }
-
-  var raw = res.message.raw;
-
-  // Apps Script's advanced services decode protobuf `bytes` fields for you and
-  // return a Byte[] — NOT the base64 string the REST API documents. So there is
-  // nothing to decode: the array already holds the raw RFC822 message. Passing
-  // it to a base64 decoder yields "Could not decode string", an error that
-  // describes the decoder's disappointment rather than the actual shape.
-  if (Object.prototype.toString.call(raw) === '[object Array]') {
-    return Utilities.newBlob(raw).getDataAsString('UTF-8');
-  }
-  if (raw && typeof raw.getDataAsString === 'function') {
-    return raw.getDataAsString('UTF-8');
-  }
-  if (raw && typeof raw.getBytes === 'function') {
-    return Utilities.newBlob(raw.getBytes()).getDataAsString('UTF-8');
-  }
-
-  // Otherwise it is a base64url string. base64DecodeWebSafe rejects unpadded
-  // input, which is what Gmail returns, so fall back to padded standard base64.
-  var bytes = null;
-  var attempts = [];
-  try {
-    bytes = Utilities.base64DecodeWebSafe(String(raw));
-  } catch (e) {
-    attempts.push('base64DecodeWebSafe: ' + (e.message || e));
-  }
-  if (bytes === null) {
-    try {
-      bytes = Utilities.base64Decode(normalizeBase64(raw));
-    } catch (e) {
-      attempts.push('base64Decode(normalised): ' + (e.message || e));
-    }
-  }
-  if (bytes === null) {
-    // Report what we were actually handed. A bare decoder message names the
-    // symptom and says nothing about the input that caused it.
-    throw new Error(
-      'Could not decode the raw draft. typeof=' + typeof raw +
-      ', constructor=' + (raw && raw.constructor ? raw.constructor.name : 'n/a') +
-      ', length=' + (typeof raw === 'string' ? raw.length : 'n/a') +
-      ', head=' + String(raw).slice(0, 40) +
-      ' | attempts: ' + attempts.join(' ;; ')
-    );
-  }
-
-  try {
-    return Utilities.newBlob(bytes).getDataAsString('UTF-8');
-  } catch (e) {
-    // Not every message body is valid UTF-8; fall back to the platform default
-    // rather than losing the whole send over an encoding guess.
-    return Utilities.newBlob(bytes).getDataAsString();
-  }
-}
-
-/**
- * File the sent copy in Gmail.
- *
- * Gmail applies SENT when Gmail sends; SES sending means Gmail never knows, so
- * we insert the message ourselves. Pinning threadId keeps the conversation
- * intact rather than relying on Gmail's subject heuristics (premortem item 4).
- * A brand-new message has no surviving thread once its draft is deleted, so it
- * is inserted without one.
- */
-function archiveToSent(rawMessage, thread) {
-  var resource = { labelIds: ['SENT'] };
-  if (thread) {
-    try {
-      if (thread.getMessageCount() > 1) resource.threadId = thread.getId();
-    } catch (e) {
-      // Thread vanished; fall back to a standalone insert.
-    }
-  }
-  var blob = Utilities.newBlob(rawMessage, 'message/rfc822');
-  Gmail.Users.Messages.insert(resource, 'me', blob, { internalDateSource: 'dateHeader' });
-}
-
-/**
- * Premortem 7: failure is always an email. The draft is left intact and
- * editable so nothing is lost — fix it and re-mark it.
- */
-function handleFailure(draft, decision, cfg, err, state) {
-  var subject = decision.subject || '(no subject)';
-  console.error('relay failed for "' + subject + '": ' + (err.stack || err.message));
-
-  // Stop the automatic retry loop. The marker is what actually prevents it —
-  // removing the label alone would not, since a subject-token draft carries no
-  // label to remove. Recording the draft's own timestamp lets a later edit
-  // count as "try again", which is the only retry gesture available on mobile.
-  try {
-    var draftDate = 0;
-    try {
-      draftDate = draft.getMessage().getDate().getTime();
-    } catch (e) {
-      // Unreadable draft; the label remains the way to retry.
-    }
-    state.failed[draft.getId()] = { at: new Date().getTime(), draftDate: draftDate };
-    saveState(PropertiesService.getScriptProperties(), state);
-  } catch (e) {
-    console.error('could not record failure marker: ' + e.message);
-  }
-
-  try {
-    if (decision.thread) {
-      addLabel(decision.thread, LABEL_FAILED);
-      removeLabel(decision.thread, LABEL_OUTBOX);
-    }
-  } catch (e) {
-    // Labelling is best-effort; the email below is the real notification.
-  }
-
-  tryAlert(
-    'Relay could not send: ' + subject,
-    'The draft was NOT sent and is still in your Drafts folder.\n\n' +
-      'Sending as: ' + (decision.alias || 'unresolved') + '\n' +
-      'Subject:    ' + subject + '\n\n' +
-      'Error:\n' + (err.message || String(err)) + '\n\n' +
-      // The stack names the line. Without it a generic runtime message like
-      // "Could not decode string" identifies the symptom and hides entirely
-      // which call produced it, which costs a round trip per diagnosis.
-      'Where:\n' + (err.stack || '(no stack available)') + '\n\n' +
-      'Fix the draft and re-apply the "' + LABEL_OUTBOX + '" label to retry.'
-  );
-}
-
-/**
- * Premortem 1: an in-flight record surviving a run means a send whose outcome
- * we cannot determine. We never auto-retry it — a duplicate to a client is
- * worse than a send you confirm by hand.
- */
-function reconcileInflight(cfg, props, state) {
-  for (var draftId in state.inflight) {
-    if (!state.inflight.hasOwnProperty(draftId)) continue;
-    var record = state.inflight[draftId] || {};
-
-    try {
-      var draft = GmailApp.getDraft(draftId);
-      if (draft) addLabel(draft.getMessage().getThread(), LABEL_REVIEW);
-    } catch (e) {
-      // The draft is gone, which means it almost certainly did send.
-    }
-
-    // The consumed marker stays: we cannot tell whether SES accepted this, and
-    // making the draft eligible again risks a duplicate.
-    delete state.inflight[draftId];
-    saveState(props, state);
-    tryAlert(
-      'Relay needs review: ' + (record.subject || '(unknown subject)'),
-      'A send was interrupted before it could be confirmed, so it may or may ' +
-        'not have gone out.\n\n' +
-        'Subject:    ' + (record.subject || '(unknown)') + '\n' +
-        'Message-ID: ' + (record.messageId || '(unknown)') + '\n\n' +
-        'Check your Sent folder. The draft has been labelled "' + LABEL_REVIEW +
-        '" and was NOT sent again automatically — re-mark it only if you ' +
-        'confirm it never left.'
-    );
-  }
-}
-
-/** Premortem 3: drafts marked but not moving are their own kind of failure. */
-function reportStuckDrafts(cfg, count) {
-  tryAlert(
-    'Relay has ' + count + ' stuck draft(s)',
-    count + ' draft(s) have been marked for sending for more than ' +
-      cfg.staleMinutes + ' minutes without going out.\n\n' +
-      'The usual cause is that the relay cannot tell which domain to send as. ' +
-      'Add a "' + LABEL_FROM_PREFIX + '<domain>" label to the draft, or start ' +
-      'the subject with ">><domain> ".'
-  );
-}
-
-// ── Small Gmail helpers ──────────────────────────────────────────────────────
-
-function ensureLabel(name) {
-  return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
-}
-
-function addLabel(thread, name) {
-  if (thread) thread.addLabel(ensureLabel(name));
-}
-
-function removeLabel(thread, name) {
-  var label = GmailApp.getUserLabelByName(name);
-  if (thread && label) thread.removeLabel(label);
-}
-
-/** Alerts must never be the reason a run dies. */
-function tryAlert(subject, body) {
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var to = props.getProperty(PROP_ALERT_EMAIL);
-    // Call sites already name the relay ("Relay could not send: ..."), so the
-    // prefix is all that needs adding.
-    if (to) MailApp.sendEmail(to, ALERT_SUBJECT_PREFIX + ' ' + subject, body);
-  } catch (e) {
-    console.error('could not send alert: ' + e.message);
   }
 }

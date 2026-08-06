@@ -39,18 +39,27 @@ script property to an empty string. That turns the subject marker off and leaves
 the label as the only way to send, at the cost of sending from mobile. Set it to
 any other string to use a different prefix.
 
-Which domain it goes out as, in priority order:
+Which domain it goes out as. Six sources, tried in order — stated intent beats
+evidence, evidence beats guessing:
 
 1. **The subject token**, when it names a domain — `>>example.net Subject here`,
    or a full address, `>>bookings@example.net Subject here`.
 2. **A `SES/from:<domain>` label** on the draft.
-3. **Inferred from the thread** — a reply goes out as the address the thread was
-   originally delivered to, matching Gmail's "reply from the same address"
-   behaviour. This covers nearly every reply, so in practice you just mark and go.
+3. **The thread's recipients** — a reply goes out as the address the thread was
+   delivered to, matching Gmail's "reply from the same address" behaviour. This
+   covers nearly every reply, so in practice you just mark and go.
+4. **The parent message**, found via the draft's `In-Reply-To`/`References`, for
+   when Gmail files a reply in a thread of its own.
+5. **The quoted body**, for when Gmail records no reply headers at all. Domain
+   only — the address quoted there is usually the sender you are replying to.
+6. **The draft's own recipients**, last and weakest.
 
-If none of those resolve, the relay **refuses to send** and emails you. It will
-not guess a default: a message that doesn't go out is recoverable, one sent from
-the wrong domain is not.
+Sources 4-6 exist because Gmail's threading is not dependable; each was added
+against a real draft the previous source could not place.
+
+If none resolve, the relay **refuses to send** and emails you, listing what each
+source examined. It will not guess a default: a message that doesn't go out is
+recoverable, one sent from the wrong domain is not.
 
 There is roughly a one-minute delay between marking and sending, which is the
 Apps Script trigger floor. That delay is also your undo window — remove the
@@ -60,15 +69,26 @@ marker within it and nothing goes out.
 
 | File | What it does | Tested |
 |---|---|---|
-| `src/mime.gs` | header rewriting, Bcc containment, alias selection, size checks | ✅ `test/mime.test.mjs` |
+| `src/mime.gs` | header rewriting, Bcc containment, HTML repair, address parsing | ✅ `test/mime.test.mjs` |
 | `src/sigv4.gs` | AWS request signing | ✅ `test/sigv4.test.mjs` (AWS vectors) |
-| `src/aws.gs` | SES send + CloudWatch heartbeat (I/O shell) | — |
-| `src/relay.gs` | the trigger, draft scanning, send ordering | — |
+| `src/relay.gs` | the trigger, draft classification, send ordering | — |
+| `src/state.gs` | what has already happened to each draft | — |
+| `src/inference.gs` | which domain a draft goes out as | — |
+| `src/gmail.gs` | Gmail I/O: reading drafts, filing to Sent, labels | — |
+| `src/notify.gs` | how failures reach you | — |
+| `src/aws.gs` | SES send + CloudWatch heartbeat | — |
 | `src/config.gs` | Script Properties, validated | — |
 | `src/setup.gs` | installer and manual checks | — |
 
 Same split as `lambda/`: the logic that can be wrong in a subtle way is pure and
-tested under Node; the I/O shells stay thin.
+tested under Node; the I/O shells stay thin. Apps Script has no imports — every
+top-level function is global across the project — so the file boundaries are
+purely about what belongs together.
+
+Two manual functions worth knowing about, both run from the editor:
+`inspectDrafts()` reports what Gmail returns for each marked draft without
+sending anything, and `clearRelayState()` forgets every past send (read its
+warning first — it can cause a duplicate).
 
 ```bash
 cd appsscript && npm test
@@ -141,8 +161,7 @@ are the only place credentials live — nothing secret is committed to this repo
 | `DOMAIN_NAMES` | optional sender names per domain, `example.com=Example Co,example.net=Ex Net`. Without one, clients show the bare local part — "hello" — rather than your brand. |
 | `ALERT_EMAIL` | where failure emails go |
 | `METRIC_NAMESPACE` | `EmailForwarder`, matching `var.metric_namespace` |
-| `SETTLE_SECONDS` | optional, default `45` |
-| `STALE_MINUTES` | optional, default `15` |
+| `SETTLE_SECONDS` | optional, default `45` — the settling delay, and your undo window |
 
 **4. Run `setUp()`** from the editor. It creates the labels, installs the
 one-minute trigger, and tells you what it configured. Google will ask you to
