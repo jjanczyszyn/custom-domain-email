@@ -15,6 +15,13 @@ jobs:
         with:
           node-version: "20"
 
+      # The forwarder's image-shrinking path depends on jimp and mailparser.
+      # lambda/src/node_modules is gitignored (it is a build artefact bundled at
+      # deploy time), so shrink.test.mjs cannot import them until they exist.
+      - name: Install forwarder dependencies
+        working-directory: lambda/src
+        run: npm ci
+
       - name: Forwarder unit tests
         working-directory: lambda
         run: npm test
