@@ -86,10 +86,14 @@ this code while testing, and re-pushing beats re-pasting six files:
 npm install -g @google/clasp
 clasp login                                    # opens a browser
 cd appsscript
-clasp create --type standalone --title "Domain mail relay" --rootDir src
+clasp create-script --type standalone --title "Domain mail relay" --rootDir src
 clasp push
-clasp open
+clasp open-script
 ```
+
+Command names differ across clasp majors — these are for clasp 3.x, where
+`create` and `open` became `create-script` and `open-script`. `clasp --help`
+lists what your version accepts.
 
 `clasp create` writes `.clasp.json` with your script ID. It is gitignored —
 `.clasp.json.example` shows the shape. After any local edit, `clasp push`.
