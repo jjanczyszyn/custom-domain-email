@@ -245,7 +245,25 @@ function processDraft(draft, decision, cfg, props) {
  */
 function fetchRawDraft(draftId) {
   var res = Gmail.Users.Drafts.get('me', draftId, { format: 'raw' });
-  var bytes = Utilities.base64DecodeWebSafe(res.message.raw);
+
+  // Be explicit about a missing payload. Feeding undefined to the decoder
+  // produces a bare "Could not decode string", which says nothing about the
+  // actual problem — that the API returned no raw content at all.
+  if (!res || !res.message || !res.message.raw) {
+    throw new Error(
+      'Gmail returned no raw content for this draft. If it is a scheduled ' +
+      'send or otherwise unusual, delete it and compose a fresh one.'
+    );
+  }
+
+  // base64DecodeWebSafe rejects unpadded input, which is exactly what the Gmail
+  // API returns. Try it anyway, then fall back to normalised standard base64.
+  var bytes;
+  try {
+    bytes = Utilities.base64DecodeWebSafe(res.message.raw);
+  } catch (e) {
+    bytes = Utilities.base64Decode(normalizeBase64(res.message.raw));
+  }
   return Utilities.newBlob(bytes).getDataAsString('UTF-8');
 }
 

@@ -236,6 +236,36 @@ test("inferAlias: no configured domain in the thread means no guess", () => {
   assert.equal(gs.inferAlias(["a@external.com"], DOMAINS, "hello"), null);
 });
 
+// ── base64url normalisation ──────────────────────────────────────────────────
+
+test("normalizeBase64: converts base64url characters to standard base64", () => {
+  assert.equal(gs.normalizeBase64("a-b_"), "a+b/");
+  // Already a multiple of four, so no padding is added on top of the swap.
+  assert.equal(gs.normalizeBase64("-_-_"), "+/+/");
+});
+
+test("normalizeBase64: pads to a multiple of four, as Gmail returns it unpadded", () => {
+  assert.equal(gs.normalizeBase64("YQ").length % 4, 0);
+  assert.equal(gs.normalizeBase64("YQ"), "YQ==");
+  assert.equal(gs.normalizeBase64("YWJj"), "YWJj");
+});
+
+test("normalizeBase64: strips whitespace and newlines", () => {
+  assert.equal(gs.normalizeBase64("YW\r\nJj"), "YWJj");
+});
+
+test("normalizeBase64: null and undefined do not throw", () => {
+  assert.equal(gs.normalizeBase64(null), "");
+  assert.equal(gs.normalizeBase64(undefined), "");
+});
+
+test("normalizeBase64: output round-trips through a real base64 decoder", () => {
+  const original = "From: a@b.com\r\nSubject: hi\r\n\r\nbody";
+  const urlSafe = Buffer.from(original).toString("base64url");
+  const decoded = Buffer.from(gs.normalizeBase64(urlSafe), "base64").toString("utf8");
+  assert.equal(decoded, original);
+});
+
 // ── Size ceiling (premortem item 7) ──────────────────────────────────────────
 
 test("utf8ByteLength: multibyte characters count as their encoded length", () => {

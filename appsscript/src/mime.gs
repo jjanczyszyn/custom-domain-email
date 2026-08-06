@@ -213,6 +213,21 @@ function inferAlias(candidates, domains, defaultLocalpart) {
   return null;
 }
 
+/**
+ * Normalise a base64url (web-safe) string to standard base64.
+ *
+ * The Gmail API returns raw messages base64url-encoded and unpadded. Apps
+ * Script's base64DecodeWebSafe is fussy about both padding and stray
+ * whitespace, and fails with a bare "Could not decode string" that says nothing
+ * about which. Converting to padded standard base64 sidesteps it.
+ */
+function normalizeBase64(value) {
+  var s = String(value == null ? '' : value).replace(/\s+/g, '');
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4 !== 0) s += '=';
+  return s;
+}
+
 /** Byte length of a string as UTF-8, without needing Buffer or Blob. */
 function utf8ByteLength(str) {
   var bytes = 0;
@@ -312,6 +327,7 @@ if (typeof module !== 'undefined') {
     parseSubjectToken: parseSubjectToken,
     resolveAlias: resolveAlias,
     inferAlias: inferAlias,
+    normalizeBase64: normalizeBase64,
     utf8ByteLength: utf8ByteLength,
     isOversize: isOversize,
     buildOutbound: buildOutbound,
