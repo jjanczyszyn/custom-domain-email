@@ -163,6 +163,17 @@ function threadRecipients(thread) {
   var messages = thread.getMessages();
   for (var i = messages.length - 1; i >= 0; i--) {
     var m = messages[i];
+
+    // Skip the draft being sent. Its recipients are who we are writing TO, not
+    // an address this thread was ever delivered to — and since it is the newest
+    // message it would win the inference. Replying to someone at one of our own
+    // domains then went out as *their* address rather than ours.
+    try {
+      if (m.isDraft()) continue;
+    } catch (e) {
+      // isDraft is unavailable on some message states; fall through and use it.
+    }
+
     var fields = [m.getTo(), m.getCc(), m.getReplyTo()];
     for (var f = 0; f < fields.length; f++) {
       if (!fields[f]) continue;
