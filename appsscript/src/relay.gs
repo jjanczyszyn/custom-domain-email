@@ -139,6 +139,13 @@ function classifyDraft(draft, cfg, props) {
   var alias = token.alias || aliasFromLabels(labelNames, cfg);
   if (!alias && thread) alias = inferAlias(threadRecipients(thread), cfg.domains, cfg.defaultLocalpart);
 
+  // Gmail does not always put a reply in the same thread as the message it
+  // answers — compose on mobile, or reply to forwarded mail, and the draft can
+  // land in a thread of its own. The thread then holds nothing to infer from
+  // even though the original was plainly addressed to one of our domains.
+  // The reply headers are authoritative where Gmail's threading is not.
+  if (!alias) alias = aliasFromReplyHeaders(id, cfg);
+
   // A draft that names no resolvable domain will never resolve one by itself —
   // waiting is pointless and, worse, silent. Treat it as a failure now, so you
   // get told once and immediately rather than discovering nothing sent.
@@ -174,6 +181,36 @@ function aliasFromLabels(labelNames, cfg) {
       var alias = resolveAlias(candidate, cfg.domains, cfg.defaultLocalpart);
       if (alias) return alias;
     }
+  }
+  return null;
+}
+
+/**
+ * Infer the alias by following the draft's own In-Reply-To / References back to
+ * the message being answered, and reading who that was addressed to.
+ *
+ * Used when Gmail's threading does not connect the reply to its parent. Only
+ * runs after thread inference has already come up empty, since it costs a raw
+ * fetch and a search per draft.
+ */
+function aliasFromReplyHeaders(draftId, cfg) {
+  try {
+    var header = splitMime(fetchRawDraft(draftId)).header;
+    var refs =
+      (readHeader(header, 'In-Reply-To') + ' ' + readHeader(header, 'References'))
+        .match(/<[^>]+>/g) || [];
+
+    // Newest reference first: the immediate parent is the best evidence of
+    // which of our addresses this conversation actually reached.
+    for (var i = refs.length - 1; i >= 0; i--) {
+      var id = refs[i].replace(/^</, '').replace(/>$/, '');
+      var threads = GmailApp.search('rfc822msgid:' + id, 0, 1);
+      if (!threads.length) continue;
+      var alias = inferAlias(threadRecipients(threads[0]), cfg.domains, cfg.defaultLocalpart);
+      if (alias) return alias;
+    }
+  } catch (e) {
+    console.warn('reply-header inference failed: ' + (e.message || e));
   }
   return null;
 }
