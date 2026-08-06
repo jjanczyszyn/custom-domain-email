@@ -23,3 +23,9 @@ node_modules/
 appsscript/.clasp.json
 # Throwaway bootstrap that carries credentials into Script Properties
 appsscript/src/bootstrap.gs
+
+# Session handoff. Local only: this repository is public, and the handoff is
+# working notes — the one file most likely to name a real domain, address, or
+# inbox in passing. It stays on disk for the next session and never in a commit.
+# (This overrides the usual convention of landing handoff.md on main.)
+handoff.md
