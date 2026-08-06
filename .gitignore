@@ -21,3 +21,5 @@ node_modules/
 
 # Apps Script project link (holds a personal scriptId)
 appsscript/.clasp.json
+# Throwaway bootstrap that carries credentials into Script Properties
+appsscript/src/bootstrap.gs
