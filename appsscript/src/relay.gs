@@ -29,7 +29,6 @@ function relayTick() {
     var snapshot = props.getProperties();
     var cfg = getConfig(snapshot);
     var state = loadState(snapshot);
-    var before = snapshot[PROP_STATE] || '';
 
     reconcileInflight(props, state);
 
@@ -68,10 +67,11 @@ function relayTick() {
     putRelayHeartbeat(cfg, sent);
 
     pruneState(state);
-    // Only write when something actually changed: an idle mailbox would
-    // otherwise cost a remote write every minute, forever.
-    var after = JSON.stringify(state);
-    if (after !== before) props.setProperty(PROP_STATE, after);
+    // saveState is a no-op when nothing changed, so an idle mailbox costs no
+    // remote write. It must still be called: a send that added and removed an
+    // in-flight entry ends the tick looking unchanged, yet the property holds
+    // the intermediate write and needs correcting.
+    saveState(props, state);
   } catch (err) {
     // A configuration or Gmail-level failure would otherwise be silent.
     console.error(errorText(err, true));

@@ -30,6 +30,20 @@ var STATE_BUCKETS = ['inflight', 'consumed', 'failed'];
  */
 var STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * What we last actually wrote, for the run in progress.
+ *
+ * saveState is called several times per tick — once before the network call so
+ * a crash is detectable, once after. Skipping a redundant write has to compare
+ * against what was LAST WRITTEN, not against what was loaded: a send that adds
+ * an in-flight entry and then removes it ends the tick equal to its starting
+ * value, while the property still holds the intermediate write. Comparing to
+ * the load-time value therefore skips the corrective write and strands the
+ * entry, which the next run reports as an unconfirmed send. Every successful
+ * send did this.
+ */
+var _lastWrittenState = null;
+
 function emptyState() {
   return { inflight: {}, consumed: {}, failed: {} };
 }
@@ -37,10 +51,17 @@ function emptyState() {
 /**
  * Read the state bundle from an already-fetched property snapshot, so this
  * costs no additional remote call.
+ *
+ * ⚠️ Only the declared buckets survive a reload. Any other key you set on the
+ * state object persists for the current run and is then silently dropped, so a
+ * "do this once" flag stored there resets on every tick and the thing fires
+ * every minute forever. If you need a new kind of persistent state, add it to
+ * STATE_BUCKETS — do not attach it ad hoc.
  */
 function loadState(snapshot) {
   var state = emptyState();
   var raw = snapshot[PROP_STATE];
+  _lastWrittenState = raw || JSON.stringify(state);
   if (!raw) return state;
 
   try {
@@ -56,8 +77,18 @@ function loadState(snapshot) {
   return state;
 }
 
+/**
+ * Persist the state, skipping the write when it would change nothing.
+ *
+ * The dirty check lives here rather than at the call site because only this
+ * function knows what was actually written — see _lastWrittenState.
+ */
 function saveState(props, state) {
-  props.setProperty(PROP_STATE, JSON.stringify(state));
+  var json = JSON.stringify(state);
+  if (json === _lastWrittenState) return false;
+  props.setProperty(PROP_STATE, json);
+  _lastWrittenState = json;
+  return true;
 }
 
 /** Drop entries past the TTL so the bundle cannot grow without bound. */
@@ -71,4 +102,18 @@ function pruneState(state) {
       if (!at || at < cutoff) delete bucket[id];
     }
   }
+}
+
+// Exported for the Node test harness; ignored by Apps Script, where `module`
+// is undefined and every top-level function is already global.
+if (typeof module !== 'undefined') {
+  module.exports = Object.assign(module.exports || {}, {
+    PROP_STATE: PROP_STATE,
+    STATE_BUCKETS: STATE_BUCKETS,
+    STATE_TTL_MS: STATE_TTL_MS,
+    emptyState: emptyState,
+    loadState: loadState,
+    saveState: saveState,
+    pruneState: pruneState,
+  });
 }
