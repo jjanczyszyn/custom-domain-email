@@ -103,8 +103,22 @@ Command names differ across clasp majors — these are for clasp 3.x, where
 `create` and `open` became `create-script` and `open-script`. `clasp --help`
 lists what your version accepts.
 
-`clasp create` writes `.clasp.json` with your script ID. It is gitignored —
-`.clasp.json.example` shows the shape. After any local edit, `clasp push`.
+`clasp create-script` writes `.clasp.json` with your script ID. It is gitignored
+— `.clasp.json.example` shows the shape. After any local edit, `clasp push`.
+
+> ⚠️ **`clasp create-script` overwrites `src/appsscript.json`** with the new
+> project's default manifest, discarding the advanced-service and scope
+> declarations. Restore it before pushing, or the Gmail advanced service is
+> never registered and the relay fails with `Gmail is not defined`:
+>
+> ```bash
+> git checkout src/appsscript.json && clasp push -f
+> ```
+
+**Changing the manifest requires re-authorisation.** Declaring new scopes does
+not grant them — the installed trigger keeps running under the authorisation it
+already has and will fail until you open the editor and run any function
+manually, which prompts for the new consent.
 
 <details>
 <summary>Without clasp</summary>

@@ -11,6 +11,7 @@
 
 var PROP_INFLIGHT_PREFIX = 'inflight:';
 var PROP_CONSUMED_PREFIX = 'consumed:';
+var PROP_FAILED_PREFIX = 'failed:';
 var CONSUMED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Trigger entry point. */
@@ -104,6 +105,15 @@ function classifyDraft(draft, cfg, props) {
 
   var labelled = labelNames.indexOf(LABEL_OUTBOX) !== -1;
   if (!labelled && !token.marked) return { action: 'skip' };
+
+  // A draft that already failed is not retried on its own. Without this, a
+  // permanent failure (bad recipient, oversize) retries every single minute and
+  // emails on each attempt — three alerts in ninety seconds, forever. Retrying
+  // is an explicit act: re-apply the outbox label, which clears the marker.
+  if (props.getProperty(PROP_FAILED_PREFIX + id)) {
+    if (!labelled) return { action: 'skip' };
+    props.deleteProperty(PROP_FAILED_PREFIX + id);
+  }
 
   // Premortem 5: never send a draft that is still being typed. This doubles as
   // the undo window — unmark within it and nothing goes out.
@@ -269,8 +279,23 @@ function handleFailure(draft, decision, cfg, err) {
   var subject = decision.subject || '(no subject)';
   console.error('relay failed for "' + subject + '": ' + (err.stack || err.message));
 
+  // Stop the automatic retry loop. The marker is what actually prevents it —
+  // removing the label alone would not, since a subject-token draft carries no
+  // label to remove.
   try {
-    if (decision.thread) addLabel(decision.thread, LABEL_FAILED);
+    PropertiesService.getScriptProperties().setProperty(
+      PROP_FAILED_PREFIX + draft.getId(),
+      String(new Date().getTime())
+    );
+  } catch (e) {
+    console.error('could not record failure marker: ' + e.message);
+  }
+
+  try {
+    if (decision.thread) {
+      addLabel(decision.thread, LABEL_FAILED);
+      removeLabel(decision.thread, LABEL_OUTBOX);
+    }
   } catch (e) {
     // Labelling is best-effort; the email below is the real notification.
   }
@@ -336,12 +361,15 @@ function reportStuckDrafts(cfg, count) {
   );
 }
 
-/** Consumed markers are only needed long enough to outlive a stuck draft. */
+/** Consumed and failed markers only need to outlive a stuck draft. */
 function pruneConsumed(props) {
   var all = props.getProperties();
   var cutoff = new Date().getTime() - CONSUMED_TTL_MS;
   for (var key in all) {
-    if (!all.hasOwnProperty(key) || key.indexOf(PROP_CONSUMED_PREFIX) !== 0) continue;
+    if (!all.hasOwnProperty(key)) continue;
+    var isMarker =
+      key.indexOf(PROP_CONSUMED_PREFIX) === 0 || key.indexOf(PROP_FAILED_PREFIX) === 0;
+    if (!isMarker) continue;
     var at = parseInt(all[key], 10);
     if (!at || at < cutoff) props.deleteProperty(key);
   }
