@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Failure paths hardened after a noise review.** A quota death inside the
+  per-draft classify loop now pauses the relay on that tick instead of being
+  miscounted as a mailbox of "unreadable drafts" (one doomed Gmail call per
+  remaining candidate). A quota death mid-send no longer emails per draft or
+  marks the draft `failed` — the draft stays clean and sends itself once the
+  quota returns. And a tick that runs but fails now still emits the heartbeat,
+  so a failure streak no longer *also* draws the canary's hourly "relay
+  silent" mail on top of the throttled run-failed alert; the watchdog now
+  fires only on true silence (dead trigger, revoked auth, unloadable config).
 - **A Gmail quota outage is now one email, not a day of noise.** When a tick
   dies on Apps Script's daily Gmail quota, the relay pauses its Gmail work and
   probes again every half hour instead of failing identically once a minute;
