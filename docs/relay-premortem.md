@@ -400,13 +400,34 @@ a count of what it held back and says so in the next alert that gets through,
 because a cap that silently drops mail is worse than no cap at all: it makes
 "nothing is wrong" and "everything is wrong" look identical from the inbox.
 
+The outage's long tail taught one more round. The quota died the evening before
+it could reset, and the *aftermath* was itself noisy: the four-hour throttle
+re-raised the same episode all day (six copies of one fact), every tick burned
+a doomed Gmail call and an error log line, and — because the heartbeat was only
+emitted on success — the external watchdog spent the outage emailing "relay
+silent" about a relay that was running fine and saying so in its own log.
+
+So a quota death now suspends Gmail work. The tick that hits the quota arms a
+half-hour pause (`pauses.gmail` in the state bundle); ticks inside it load
+state, emit the heartbeat, and exit without a single Gmail call. The heartbeat
+during a pause is the truth — the *trigger* is alive, which is what the
+watchdog exists to check; the inability to send was already reported by mail.
+When the pause expires, one probe tick asks Gmail again: still dead re-arms the
+pause silently, recovered resumes scanning, at most half an hour late against
+an outage measured in hours. The quota alert itself is throttled per episode —
+24 hours, matching the length of the condition it reports — so an exhausted
+quota is one email, and its recovery is announced by the relay simply working.
+
 **The lesson worth keeping:** a loop that is correct can still be unaffordable,
 and quota is consumed by the work you skip as well as the work you do. Anything
 running on a timer should be costed per tick and multiplied out to a day —
 "correct" and "sustainable" are separate reviews, and only one of them was done.
 
 A second lesson, cheaper to state: an alert that fires on a repeating condition
-needs a throttle, or the first outage takes the alarm system down with it.
+needs a throttle, or the first outage takes the alarm system down with it. And
+a third, learned from the throttle itself: match the throttle to the length of
+the condition, not to a round number — a day-long outage reported every four
+hours is still five emails of noise about one fact.
 
 ## Deliberately not solved
 

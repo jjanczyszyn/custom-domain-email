@@ -37,6 +37,14 @@ var FULL_SWEEP_MS = 60 * 60 * 1000;
 // letting one tick walk an unbounded list.
 var SCAN_LIMIT = 50;
 
+// How long Gmail work stays suspended after a tick dies on the daily quota.
+// Once that quota is gone every Gmail call fails identically until the day's
+// window rolls over, which can be most of a day — retrying every minute is
+// 1,440 doomed calls that all report the same thing. Probing twice an hour
+// notices the reset within half an hour of it happening, which is nothing
+// against an outage measured in hours, and keeps the execution log readable.
+var QUOTA_PAUSE_MS = 30 * 60 * 1000;
+
 /** Trigger entry point. */
 function relayTick() {
   // Premortem 6: overlapping runs would double-send. A second run exits rather
@@ -60,6 +68,19 @@ function relayTick() {
     var snapshot = props.getProperties(); // one remote read serves config and state
     state = loadState(snapshot);
     var cfg = getConfig(snapshot);
+
+    // A quota pause set by an earlier tick. The trigger is alive and must say
+    // so — the heartbeat is what stops the external watchdog reporting the
+    // relay dead, and during a quota outage it is telling the truth: the
+    // script runs, it just declines to spend Gmail calls it does not have.
+    // The operator already has exactly one email about the episode.
+    var pause = state.pauses['gmail'];
+    if (pause && pause.until && new Date().getTime() < pause.until) {
+      var wait = Math.ceil((pause.until - new Date().getTime()) / 60000);
+      console.log('gmail quota pause active; next probe in ~' + wait + ' min');
+      putRelayHeartbeat(cfg, 0);
+      return;
+    }
 
     reconcileInflight(props, state);
 
@@ -114,6 +135,15 @@ function relayTick() {
     // reportRunFailed persists its own throttle marker, and tolerates a null
     // state by alerting without throttling — which is the right way round: an
     // unthrottled alert is noisy, a missing one is invisible.
+    //
+    // A quota death additionally suspends Gmail work (see QUOTA_PAUSE_MS):
+    // ticks inside the pause heartbeat and exit rather than repeating this
+    // same failure once a minute for the rest of the day. reportRunFailed's
+    // unconditional save is what persists the pause entry.
+    if (state && isServiceQuotaError(err)) {
+      var paused = new Date().getTime();
+      state.pauses['gmail'] = { at: paused, until: paused + QUOTA_PAUSE_MS };
+    }
     console.error(errorText(err, true));
     reportRunFailed(err, state, props);
   } finally {
@@ -372,6 +402,8 @@ if (typeof module !== 'undefined') {
     SUBJECT_RECHECK_MS: SUBJECT_RECHECK_MS,
     FULL_SWEEP_MS: FULL_SWEEP_MS,
     SCAN_LIMIT: SCAN_LIMIT,
+    QUOTA_PAUSE_MS: QUOTA_PAUSE_MS,
+    relayTick: relayTick,
     selectMarkedDrafts: selectMarkedDrafts,
   });
 }
