@@ -124,6 +124,25 @@ function claimAlertBudget(props) {
 var ALERT_THROTTLE_MS = 4 * 60 * 60 * 1000;
 
 /**
+ * The quota case gets a day, not four hours: an exhausted daily quota IS a
+ * day-long condition, and it announces its own end by the relay simply
+ * resuming. Re-raising it mid-episode tells the operator nothing they were
+ * not told the first time. A quota problem that genuinely recurs still
+ * surfaces — once per day, which is exactly as often as it can recur.
+ */
+var QUOTA_ALERT_THROTTLE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Is this Apps Script's daily-quota refusal? Shared by the alert throttle and
+ * relayTick's pause logic, so the two cannot disagree about what counts.
+ * Matched on the message — "Service invoked too many times for one day" — so
+ * the same cause thrown from a different call site is still recognised.
+ */
+function isServiceQuotaError(err) {
+  return /too many times/i.test(errorText(err));
+}
+
+/**
  * The whole run failed — bad configuration, or Gmail refusing to talk to us.
  *
  * Throttled, because this class of failure repeats on every tick by nature.
@@ -136,12 +155,13 @@ function reportRunFailed(err, state, props) {
 
   // Fingerprint on the message rather than the stack, so the same cause
   // recurring from a slightly different line is still recognised as a repeat.
-  var quota = /too many times/i.test(message);
+  var quota = isServiceQuotaError(err);
   var key = quota ? 'gmail-quota' : message.slice(0, 120);
+  var throttleMs = quota ? QUOTA_ALERT_THROTTLE_MS : ALERT_THROTTLE_MS;
 
   var due = true;
   if (state && state.notices) {
-    due = dueAgain(state, 'notices', key, ALERT_THROTTLE_MS, new Date().getTime());
+    due = dueAgain(state, 'notices', key, throttleMs, new Date().getTime());
 
     // Persist unconditionally, and BEFORE the throttled early return. A failing
     // tick has usually already recorded something that must outlive it — the
@@ -168,14 +188,18 @@ function reportRunFailed(err, state, props) {
       (quota
         ? 'This is Gmail\'s daily quota for Apps Script calls (20,000 a day on a\n' +
           'consumer account), not an SES or AWS problem. It resets 24 hours after\n' +
-          'the first call of the day, and the relay resumes on its own.\n\n' +
-          'If it keeps recurring, the scan is reading more drafts than it should —\n' +
-          'run showConfig() and check the "scan examined" lines in the execution\n' +
-          'log. A targeted scan should examine very few drafts; a full sweep runs\n' +
-          'once an hour and examines every draft in the mailbox.\n\n'
+          'the first call of the day.\n\n' +
+          'The relay has paused its Gmail work and now probes every half hour,\n' +
+          'so it resumes on its own within ~30 minutes of the quota returning.\n' +
+          'Drafts you mark in the meantime stay put and go out then. Expect no\n' +
+          'further mail about this episode — silence here means it is working.\n\n' +
+          'If this arrives on most days, the scan is reading more drafts than it\n' +
+          'should — run showConfig() and check the "scan examined" lines in the\n' +
+          'execution log. A targeted scan should examine very few drafts; a full\n' +
+          'sweep runs once an hour and examines every draft in the mailbox.\n\n'
         : '') +
       'Further alerts about this same failure are suppressed for ' +
-      Math.round(ALERT_THROTTLE_MS / 3600000) + ' hours.'
+      Math.round(throttleMs / 3600000) + ' hours.'
   );
 }
 
@@ -288,6 +312,8 @@ function errorText(err, withStack) {
 if (typeof module !== 'undefined') {
   module.exports = Object.assign(module.exports || {}, {
     ALERT_THROTTLE_MS: ALERT_THROTTLE_MS,
+    QUOTA_ALERT_THROTTLE_MS: QUOTA_ALERT_THROTTLE_MS,
+    isServiceQuotaError: isServiceQuotaError,
     RETRY_INSTRUCTIONS: RETRY_INSTRUCTIONS,
     tryAlert: tryAlert,
     claimAlertBudget: claimAlertBudget,

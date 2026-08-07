@@ -20,6 +20,9 @@
  *   sweeps   — when the last full mailbox scan ran.
  *   notices  — when a given alert was last emailed, so one stuck failure does
  *              not send the same mail 1,440 times.
+ *   pauses   — until when a class of work is suspended. Today one key, 'gmail':
+ *              set when a tick dies on the daily quota, so the ticks that
+ *              follow skip Gmail entirely instead of failing the same way.
  *
  * All six live under ONE property. Script Properties is the same surface that
  * holds your credentials and configuration, so a marker per draft would bury
@@ -27,7 +30,7 @@
  */
 
 var PROP_STATE = '_relayState';
-var STATE_BUCKETS = ['inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices'];
+var STATE_BUCKETS = ['inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices', 'pauses'];
 
 /**
  * How long an entry survives.
@@ -50,7 +53,7 @@ var STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * worth avoiding, and re-reading is all a miss costs.
  */
 var CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-var STATE_TTL_OVERRIDES = { seen: CACHE_TTL_MS, notices: CACHE_TTL_MS };
+var STATE_TTL_OVERRIDES = { seen: CACHE_TTL_MS, notices: CACHE_TTL_MS, pauses: CACHE_TTL_MS };
 
 /**
  * What we last actually wrote, for the run in progress.

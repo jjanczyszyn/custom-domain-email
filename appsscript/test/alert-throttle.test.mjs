@@ -115,6 +115,49 @@ test("state is persisted even when the alert itself is suppressed", () => {
   );
 });
 
+/**
+ * A quota outage lasts until the day's window rolls over — re-raising it every
+ * four hours re-announces a condition whose end the relay announces itself, by
+ * resuming. One mail per episode; the episode cannot recur faster than daily.
+ */
+test("a quota alert is raised once per day, not once per throttle window", () => {
+  const state = freshState();
+  const props = { setProperty: () => {} };
+
+  gs.reportRunFailed(quotaError(), state, props);
+
+  // Five hours on: past the generic 4h throttle, still the same episode.
+  state.notices["gmail-quota"].at = Date.now() - 5 * 3600 * 1000;
+  gs.reportRunFailed(quotaError(), state, props);
+  assert.equal(sent.length, 1, "the same quota episode must not re-alert");
+
+  // A day and a hour on: if it is still (or again) exhausted, that is news.
+  state.notices["gmail-quota"].at = Date.now() - 25 * 3600 * 1000;
+  gs.reportRunFailed(quotaError(), state, props);
+  assert.equal(sent.length, 2, "a quota problem spanning days still surfaces");
+});
+
+test("non-quota failures keep the shorter four-hour throttle", () => {
+  const state = freshState();
+  const props = { setProperty: () => {} };
+  const fault = () => new Error("Missing Script Properties: DOMAINS");
+
+  gs.reportRunFailed(fault(), state, props);
+  const key = Object.keys(state.notices)[0];
+  state.notices[key].at = Date.now() - 5 * 3600 * 1000;
+  gs.reportRunFailed(fault(), state, props);
+
+  assert.equal(sent.length, 2, "an ordinary fault is re-raised after four hours");
+});
+
+test("the quota mail says the relay paused and that silence means recovery", () => {
+  gs.reportRunFailed(quotaError(), freshState(), { setProperty: () => {} });
+
+  assert.match(sent[0].body, /paused its Gmail work/i);
+  assert.match(sent[0].body, /resumes on its own/i);
+  assert.match(sent[0].body, /suppressed for 24 hours/i);
+});
+
 test("a run that failed before state could load still alerts", () => {
   gs.reportRunFailed(new Error("PropertiesService unavailable"), null, null);
 

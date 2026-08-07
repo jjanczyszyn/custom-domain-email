@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A Gmail quota outage is now one email, not a day of noise.** When a tick
+  dies on Apps Script's daily Gmail quota, the relay pauses its Gmail work and
+  probes again every half hour instead of failing identically once a minute;
+  paused ticks still emit the heartbeat, so the external watchdog no longer
+  reports a running relay as silent. The quota alert throttles per episode
+  (24 hours) rather than per the generic four-hour window, and its text now
+  says the relay has paused and will resume itself. Covered by
+  `quota-pause.test.mjs`, which drives `relayTick` end to end.
+
 ### Added
 
 - **Outbound relay (Gmail → SES), replacing Gmail "Send as".** Google removes
