@@ -62,12 +62,13 @@ function relayTick() {
   // buckets over the consumed markers, and consumed is what stops a resend.
   var props = null;
   var state = null;
+  var cfg = null;
 
   try {
     props = PropertiesService.getScriptProperties();
     var snapshot = props.getProperties(); // one remote read serves config and state
     state = loadState(snapshot);
-    var cfg = getConfig(snapshot);
+    cfg = getConfig(snapshot);
 
     // A quota pause set by an earlier tick. The trigger is alive and must say
     // so — the heartbeat is what stops the external watchdog reporting the
@@ -94,6 +95,12 @@ function relayTick() {
       try {
         decision = classifyDraft(drafts[i], cfg, state);
       } catch (e) {
+        // The daily quota is the exception to the skip below: it is not a
+        // property of this draft, and every draft after it fails the same way
+        // at a Gmail call per attempt. Surface it so the run-level handler
+        // pauses Gmail work now, not one warning-filled tick from now.
+        if (isServiceQuotaError(e)) throw e;
+
         // GmailApp.getDrafts() returns drafts it cannot then read — a scheduled
         // send, or one in some other state that rejects getMessage() with
         // "Gmail operation not allowed". Letting that propagate would abort the
@@ -146,6 +153,16 @@ function relayTick() {
     }
     console.error(errorText(err, true));
     reportRunFailed(err, state, props);
+
+    // A failing tick is not a silent one. The watchdog exists to catch true
+    // silence — a disabled trigger, revoked auth — where nothing runs and
+    // nothing can email; a tick that ran far enough to load its config is
+    // loudly alive, and its failure is already reported (throttled) above.
+    // Without this, any failure streak past an hour also draws the canary's
+    // "relay silent" mail every hour on top of the run-failed alert.
+    // Deliberately last: a crash inside the failure path itself skips the
+    // heartbeat, which is then the watchdog's honest cue to fire.
+    if (cfg) putRelayHeartbeat(cfg, 0);
   } finally {
     lock.releaseLock();
   }
@@ -389,6 +406,16 @@ function processDraft(draft, decision, cfg, props, state) {
 
     delete state.inflight[id];
     delete state.consumed[id];
+
+    // The daily quota is a relay-wide outage, not a defect in this draft.
+    // reportNotSent would email about every pending draft and mark each
+    // `failed` — gating them all behind a manual retry for an outage that was
+    // never their fault. Surfacing it instead pauses Gmail work, and the
+    // untouched drafts go out by themselves once the quota returns. Safe to
+    // rethrow here because SES has NOT accepted (that branch returned above):
+    // the deletes just performed make the next attempt a clean first attempt.
+    if (isServiceQuotaError(err)) throw err;
+
     reportNotSent(draft, decision, err, state, props);
     return false;
   }
