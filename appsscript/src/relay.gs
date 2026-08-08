@@ -211,6 +211,15 @@ function collectDrafts(cfg, state, now) {
  * read — but only when the draft has actually changed since we last looked,
  * which Gmail reveals for free by replacing the message id on every edit.
  *
+ * The memo remembers the ANSWER, not just the visit. A draft found marked
+ * stays picked on every tick without re-reading anything — necessary because
+ * classification can decline to send it yet (the settle window), and a memo
+ * that only said "seen recently" would then hide the draft for the whole
+ * ten-minute recheck. That is how the very first token-marked send went out
+ * ten minutes late: seen at 34 seconds old, skipped as settling, and not
+ * looked at again until the recheck. Unmarking still works: editing the
+ * subject replaces the message id, which invalidates the memo.
+ *
  * `readSubject` is injected so this stays testable without Gmail, and returns
  * null for a draft it cannot read.
  */
@@ -231,14 +240,21 @@ function selectMarkedDrafts(labelled, recent, state, cfg, now, readSubject) {
 
     var memo = state.seen[draft.id];
     var unchanged = memo && memo.messageId === draft.messageId;
+    if (unchanged && memo.marked) {
+      picked[draft.id] = true;
+      continue;
+    }
     var checkedRecently = memo && memo.at && now - memo.at < SUBJECT_RECHECK_MS;
     if (unchanged && checkedRecently) continue;
 
     var subject = readSubject(draft.messageId);
-    state.seen[draft.id] = { messageId: draft.messageId, at: now };
-    if (subject === null) continue;
+    if (subject === null) {
+      state.seen[draft.id] = { messageId: draft.messageId, at: now };
+      continue;
+    }
 
     var token = parseSubjectToken(subject, cfg.domains, cfg.defaultLocalpart, cfg.subjectToken);
+    state.seen[draft.id] = { messageId: draft.messageId, at: now, marked: token.marked };
     if (token.marked) picked[draft.id] = true;
   }
 

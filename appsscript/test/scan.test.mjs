@@ -96,6 +96,40 @@ test("an unchanged draft is re-read once the recheck window passes", () => {
   assert.equal(read.reads.length, 2);
 });
 
+/**
+ * The memo must remember the answer, not just the visit. A draft marked at
+ * compose time is seen once inside its settle window and correctly not sent
+ * yet — but a memo that only said "seen recently" then hid it for the whole
+ * ten-minute recheck. The very first token-marked send went out ten minutes
+ * late this way; a compose-time token is the normal mobile workflow, so this
+ * is the main path, not an edge.
+ */
+test("a marked draft stays picked on every tick, without re-reading", () => {
+  const state = gs.emptyState();
+  const read = reader({ m1: ">>example.com marked while composing" });
+  const recent = [draft("d1", "m1")];
+
+  const first = gs.selectMarkedDrafts([], recent, state, cfg, 1000, read);
+  const second = gs.selectMarkedDrafts([], recent, state, cfg, 2000, read);
+  const third = gs.selectMarkedDrafts([], recent, state, cfg, 3000, read);
+
+  assert.deepEqual(first, ["d1"]);
+  assert.deepEqual(second, ["d1"], "still picked while it settles");
+  assert.deepEqual(third, ["d1"]);
+  assert.equal(read.reads.length, 1, "the answer was paid for once");
+});
+
+test("editing a marked draft re-reads it, so unmarking works", () => {
+  const state = gs.emptyState();
+  const read = reader({ m1: ">>example.com send this", m2: "changed my mind" });
+
+  gs.selectMarkedDrafts([], [draft("d1", "m1")], state, cfg, 1000, read);
+  const picked = gs.selectMarkedDrafts([], [draft("d1", "m2")], state, cfg, 2000, read);
+
+  assert.deepEqual(picked, [], "the edit that removed the token must be honoured");
+  assert.deepEqual(read.reads, ["m1", "m2"]);
+});
+
 test("a draft already handed to SES is never read again", () => {
   const state = gs.emptyState();
   state.consumed["d1"] = { at: 1000 };
