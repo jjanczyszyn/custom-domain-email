@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A draft marked while composing now sends ~1 minute after settling, not
+  ~10.** The scan's seen-memo recorded only that a draft had been examined,
+  so one marked at compose time — the normal mobile token workflow — was seen
+  once inside its 45-second settle window, correctly held, and then hidden
+  from the scan until the ten-minute subject recheck. The memo now records
+  the answer (marked or not): a marked draft stays selected every tick at no
+  extra Gmail cost, and editing the subject still invalidates the memo via
+  the message-id change, so unmarking keeps working. Found live by the
+  post-quota end-to-end send check.
 - **Failure paths hardened after a noise review.** A quota death inside the
   per-draft classify loop now pauses the relay on that tick instead of being
   miscounted as a mailbox of "unreadable drafts" (one doomed Gmail call per
