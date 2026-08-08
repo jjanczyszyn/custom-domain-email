@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Emoji replies no longer arrive looking empty.** Gmail's stored reply
+  markup closes the HTML document before the quoted history; unrepaired,
+  recipients' clients collapse the entire body behind a "trimmed content"
+  ellipsis. The repair existed but pattern-matched the wire bytes — and
+  base64, which Gmail picks for emoji-heavy text parts, hid the markup from
+  it entirely (quoted-printable soft breaks could likewise split a closing
+  tag). `repairHtmlParts` now decodes each text/html part, repairs it, and
+  re-encodes only when something changed; well-formed parts ship
+  byte-identical and attachments are never touched. Found live: every emoji
+  reply shipped broken while every ASCII test passed.
 - **A draft marked while composing now sends ~1 minute after settling, not
   ~10.** The scan's seen-memo recorded only that a draft had been examined,
   so one marked at compose time — the normal mobile token workflow — was seen
