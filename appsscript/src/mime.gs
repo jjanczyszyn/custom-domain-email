@@ -296,23 +296,180 @@ function fixStrayClosingTags(html) {
   return cleaned.replace(/\s+$/, '') + '</body></html>';
 }
 
+// ── Transfer-encoding codecs ─────────────────────────────────────────────────
+//
+// The repair below must see the DECODED part, not its wire form. Both of the
+// encodings Gmail uses defeat a regex over raw bytes: quoted-printable's soft
+// line breaks can split a closing tag ("</bo=\r\ndy>"), and base64 — which
+// Gmail picks for any emoji-heavy text part, not just attachments — hides the
+// markup entirely. Every emoji reply shipped unrepaired that way, and arrived
+// looking empty.
+//
+// The codecs work on "binary strings" (one char per byte, no UTF-8
+// interpretation). The repair only relocates ASCII tags, so non-ASCII bytes
+// pass through untouched and nothing here needs a Unicode round-trip. Pure JS,
+// no Utilities/Buffer, so Node tests exercise the exact code Apps Script runs.
+
+var B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/** Standard or web-safe base64 to a binary string. Whitespace tolerated. */
+function base64DecodeBinary(encoded) {
+  var s = String(encoded).replace(/[\s]/g, '').replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+  var out = '';
+  var buffer = 0;
+  var bits = 0;
+  for (var i = 0; i < s.length; i++) {
+    var v = B64_ALPHABET.indexOf(s.charAt(i));
+    if (v === -1) return null; // not base64 after all; let the caller leave it alone
+    buffer = (buffer << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += String.fromCharCode((buffer >> bits) & 0xff);
+    }
+  }
+  return out;
+}
+
+/** Binary string to base64, wrapped at 76 columns as RFC 2045 requires. */
+function base64EncodeBinary(binary) {
+  var out = '';
+  var i;
+  for (i = 0; i + 2 < binary.length; i += 3) {
+    var n = (binary.charCodeAt(i) << 16) | (binary.charCodeAt(i + 1) << 8) | binary.charCodeAt(i + 2);
+    out += B64_ALPHABET.charAt((n >> 18) & 63) + B64_ALPHABET.charAt((n >> 12) & 63) +
+           B64_ALPHABET.charAt((n >> 6) & 63) + B64_ALPHABET.charAt(n & 63);
+  }
+  var rest = binary.length - i;
+  if (rest === 1) {
+    var a = binary.charCodeAt(i);
+    out += B64_ALPHABET.charAt((a >> 2) & 63) + B64_ALPHABET.charAt((a << 4) & 63) + '==';
+  } else if (rest === 2) {
+    var b = (binary.charCodeAt(i) << 8) | binary.charCodeAt(i + 1);
+    out += B64_ALPHABET.charAt((b >> 10) & 63) + B64_ALPHABET.charAt((b >> 4) & 63) +
+           B64_ALPHABET.charAt((b << 2) & 63) + '=';
+  }
+  return out.replace(/(.{76})(?=.)/g, '$1\r\n');
+}
+
+/** Quoted-printable to a binary string: soft breaks removed, =XX decoded. */
+function qpDecodeBinary(encoded) {
+  return String(encoded)
+    .replace(/=\r?\n/g, '')
+    .replace(/=([0-9A-Fa-f]{2})/g, function (m, hex) {
+      return String.fromCharCode(parseInt(hex, 16));
+    });
+}
+
+/**
+ * Binary string to quoted-printable: RFC 2045 encoding, lines wrapped at 76
+ * with soft breaks, trailing whitespace on a line always encoded.
+ */
+function qpEncodeBinary(binary) {
+  var HEX = '0123456789ABCDEF';
+  var encoded = '';
+  var i;
+  for (i = 0; i < binary.length; i++) {
+    var c = binary.charCodeAt(i);
+    var isCrlf = c === 13 && binary.charCodeAt(i + 1) === 10;
+    if (isCrlf) {
+      encoded += '\r\n';
+      i++;
+    } else if (c === 9 || c === 32) {
+      // Space and tab are literal except before a line break, where they must
+      // be encoded or the receiver is entitled to strip them.
+      var next = binary.charCodeAt(i + 1);
+      var atEol = i + 1 === binary.length || (next === 13 && binary.charCodeAt(i + 2) === 10);
+      encoded += atEol ? '=' + HEX.charAt(c >> 4) + HEX.charAt(c & 15) : binary.charAt(i);
+    } else if (c >= 33 && c <= 126 && c !== 61) {
+      encoded += binary.charAt(i);
+    } else {
+      encoded += '=' + HEX.charAt(c >> 4) + HEX.charAt(c & 15);
+    }
+  }
+
+  // Wrap: no encoded line may exceed 76 chars including its trailing '='.
+  var out = '';
+  var lines = encoded.split('\r\n');
+  for (i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    while (line.length > 75) {
+      var cut = 75;
+      // Never split an =XX escape across the soft break.
+      if (line.charAt(cut - 1) === '=') cut -= 1;
+      else if (line.charAt(cut - 2) === '=') cut -= 2;
+      out += line.slice(0, cut) + '=\r\n';
+      line = line.slice(cut);
+    }
+    out += line + (i < lines.length - 1 ? '\r\n' : '');
+  }
+  return out;
+}
+
 /**
  * Apply the repair to every part of a message, leaving MIME structure intact.
  * Splits on boundary lines rather than parsing MIME, so nested multiparts and
  * unknown content types pass through untouched.
+ *
+ * Only text/html parts are examined — the collapse this repairs is an HTML
+ * phenomenon — and each is examined in DECODED form: quoted-printable and
+ * base64 parts are decoded, repaired, and re-encoded, but re-encoded ONLY
+ * when the repair actually changed something, so an already-well-formed part
+ * ships byte-identical. Attachments never qualify (wrong content type) and
+ * are never decoded. `outerHeader` supplies the message's own header block so
+ * a single-part message — whose Content-Type lives there rather than in any
+ * part — is treated the same way.
  */
-function repairHtmlParts(raw) {
+function repairHtmlParts(raw, outerHeader) {
   var segments = String(raw).split(/(\r?\n--[^\r\n]*(?:\r?\n|$))/);
+
   for (var i = 0; i < segments.length; i++) {
     if (/^\r?\n--/.test(segments[i])) continue; // a boundary, not content
+    if (!segments[i]) continue;
 
-    // Base64 attachments can be megabytes and can never contain HTML; scanning
-    // them is pure waste on a path that runs for every send.
-    if (/Content-Transfer-Encoding:\s*base64/i.test(segments[i].slice(0, 500))) continue;
+    // Does this segment open with its own header block?
+    var m = segments[i].match(/^([A-Za-z][A-Za-z0-9-]*:[^\r\n]*(?:\r?\n(?:[A-Za-z][A-Za-z0-9-]*:[^\r\n]*|[ \t][^\r\n]*))*\r?\n)\r?\n([\s\S]*)$/);
+    var partHeader = m ? m[1] : '';
+    var partBody = m ? m[2] : segments[i];
+    var headerForPart = partHeader || String(outerHeader || '');
 
-    segments[i] = fixStrayClosingTags(segments[i]);
+    var repaired = repairOnePart(headerForPart, partBody);
+    if (repaired !== partBody) {
+      // Splice the repaired body back after the untouched header bytes.
+      segments[i] = m
+        ? segments[i].slice(0, segments[i].length - partBody.length) + repaired
+        : repaired;
+    }
   }
   return segments.join('');
+}
+
+/** Repair a single part's body according to its declared type and encoding. */
+function repairOnePart(header, body) {
+  var contentType = readHeader(header, 'Content-Type');
+
+  // No declared type at all: legacy posture — try the repair on the bare text.
+  // This keeps preambles and header-less fragments behaving as they always
+  // have, where the regex either fixes plain HTML or harmlessly matches
+  // nothing.
+  if (!contentType) return fixStrayClosingTags(body);
+
+  if (!/text\/html/i.test(contentType)) return body;
+
+  var encoding = readHeader(header, 'Content-Transfer-Encoding').toLowerCase();
+  if (encoding === 'base64') {
+    var decoded = base64DecodeBinary(body);
+    if (decoded === null) return body; // not decodable; do no harm
+    var fixed = fixStrayClosingTags(decoded);
+    return fixed === decoded ? body : base64EncodeBinary(fixed);
+  }
+  if (encoding === 'quoted-printable') {
+    var qpDecoded = qpDecodeBinary(body);
+    var qpFixed = fixStrayClosingTags(qpDecoded);
+    return qpFixed === qpDecoded ? body : qpEncodeBinary(qpFixed);
+  }
+  // 7bit/8bit/binary/absent: the bytes are the text.
+  return fixStrayClosingTags(body);
 }
 
 /**
@@ -398,7 +555,9 @@ function buildOutbound(raw, options) {
 
   // Gmail's draft markup closes the document before the quoted reply. Left
   // alone, recipients see an apparently empty message. See fixStrayClosingTags.
-  var body = repairHtmlParts(parts.body);
+  // The header rides along so a single-part message's Content-Type — declared
+  // there rather than in any part — still routes it through the right decoder.
+  var body = repairHtmlParts(parts.body, parts.header);
 
   var recipients = collectRecipients(header);
   var originalFrom = readHeader(header, 'From');
@@ -483,6 +642,11 @@ if (typeof module !== 'undefined') {
     displayNameFor: displayNameFor,
     fixStrayClosingTags: fixStrayClosingTags,
     repairHtmlParts: repairHtmlParts,
+    repairOnePart: repairOnePart,
+    base64DecodeBinary: base64DecodeBinary,
+    base64EncodeBinary: base64EncodeBinary,
+    qpDecodeBinary: qpDecodeBinary,
+    qpEncodeBinary: qpEncodeBinary,
     inferDomainFromText: inferDomainFromText,
     normalizeBase64: normalizeBase64,
     utf8ByteLength: utf8ByteLength,

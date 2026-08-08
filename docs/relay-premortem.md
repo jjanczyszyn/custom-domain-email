@@ -298,6 +298,20 @@ markup that only ever worked because Gmail repaired it at send time — an
 invariant supplied by the component we replaced. When you take over one stage of
 a pipeline, audit what that stage was silently fixing.
 
+*Recurrence, found live:* the repair pattern-matched the WIRE bytes, and both
+of Gmail's transfer encodings defeat that. Quoted-printable soft breaks can
+split a closing tag across lines; base64 — which Gmail selects for emoji-heavy
+text parts, not just attachments — hides the markup entirely, and the old code
+explicitly skipped base64 segments as "attachments". So every emoji reply
+shipped broken while every ASCII test passed: the test inputs and the failing
+inputs took different encodings. The repair now decodes each text/html part,
+fixes it, and re-encodes only when the fix changed something
+(`encoded-repair.test.mjs` pins both gaps and the do-no-harm cases). The added
+lesson: a transformation on encoded content must run in the content's domain,
+not the encoding's — and a test corpus must include the input *shapes* that
+pick different encodings, because "same text, more emoji" is a different wire
+format.
+
 **16. Every message went out showing "hello" instead of the brand.**
 
 Each domain is configured with a sender name, so recipients should see
