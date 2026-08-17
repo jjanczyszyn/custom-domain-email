@@ -145,9 +145,9 @@ test("a recovered quota resumes normal scanning", () => {
   );
 });
 
-// A refusal Gmail is known to retract on its own takes the transient path
-// instead — see transient-fault.test.mjs — so this uses a failure that means
-// nothing but itself.
+// Whether a failure is emailed is the alert policy's business, and lives in
+// run-failure-alerts.test.mjs. What this pins down is that pausing does not
+// leak out of the quota case into failures that mean nothing but themselves.
 test("a non-quota failure does not pause Gmail work, but still heartbeats", () => {
   globalThis.GmailApp.getDrafts = () => {
     gmailCalls++;
@@ -156,8 +156,7 @@ test("a non-quota failure does not pause Gmail work, but still heartbeats", () =
 
   gs.relayTick();
 
-  assert.equal(sent.length, 1, "it alerts as before");
-  assert.ok(!relayState().pauses.gmail, "but pausing is reserved for the quota");
+  assert.ok(!relayState().pauses.gmail, "pausing is reserved for the quota");
   assert.equal(beats.length, 1, "a tick that ran and failed is not a silent tick");
 });
 
@@ -171,8 +170,16 @@ test("a run that dies before config loads does not heartbeat", () => {
 
   gs.relayTick();
 
-  assert.equal(sent.length, 1, "the config failure is reported by mail");
   assert.equal(beats.length, 0, "with no config there is nothing to heartbeat with");
+
+  // A misconfigured relay sends nothing at all, so nothing is ever "waiting" in
+  // the sense the alert policy means — the blind window is what reports it.
+  const state = relayState();
+  state.faults.run.first = Date.now() - 11 * 60 * 1000;
+  store._relayState = JSON.stringify(state);
+  gs.relayTick();
+
+  assert.equal(sent.length, 1, "and the config failure is reported by mail");
 });
 
 /**

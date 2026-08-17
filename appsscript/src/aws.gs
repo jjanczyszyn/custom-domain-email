@@ -153,3 +153,52 @@ function putRelayHeartbeat(cfg, sentCount) {
     console.warn('heartbeat failed: ' + errorText(e));
   }
 }
+
+/**
+ * Report that a run failed, to CloudWatch.
+ *
+ * Most run-level failures are no longer emailed — one that had no mail waiting
+ * on it costs the operator an interruption and gives them nothing to do. This
+ * is where those go instead, so "has the relay been failing quietly?" has an
+ * answer that can be asked from a shell:
+ *
+ *   aws cloudwatch list-metrics --namespace EmailForwarder --metric-name RelayFault
+ *   aws cloudwatch get-metric-statistics --namespace EmailForwarder \
+ *     --metric-name RelayFault --period 3600 --statistics Sum ...
+ *
+ * Emitted twice: once bare, so a total is queryable without knowing what broke,
+ * and once dimensioned by a slug of the message, so the answer names it. The
+ * slug is fingerprinted (notify.gs) rather than raw — a dimension value per
+ * occurrence would mint a custom metric per occurrence, and those are billed.
+ *
+ * Never throws: the same rule as the heartbeat. Monitoring reports failures; it
+ * does not get to cause them.
+ */
+function putRelayFault(cfg, slug) {
+  try {
+    var params = [
+      'Action=PutMetricData',
+      'Version=2010-08-01',
+      'Namespace=' + encodeURIComponent(cfg.metricNamespace),
+      'MetricData.member.1.MetricName=RelayFault',
+      'MetricData.member.1.Value=1',
+      'MetricData.member.1.Unit=Count',
+      'MetricData.member.2.MetricName=RelayFault',
+      'MetricData.member.2.Value=1',
+      'MetricData.member.2.Unit=Count',
+      'MetricData.member.2.Dimensions.member.1.Name=Fault',
+      'MetricData.member.2.Dimensions.member.1.Value=' + encodeURIComponent(slug),
+    ].join('&');
+
+    awsFetch(
+      cfg,
+      'monitoring',
+      'monitoring.' + cfg.region + '.amazonaws.com',
+      '/',
+      params,
+      'application/x-www-form-urlencoded; charset=utf-8'
+    );
+  } catch (e) {
+    console.warn('fault metric failed: ' + errorText(e));
+  }
+}

@@ -45,19 +45,23 @@ var SCAN_LIMIT = 50;
 // against an outage measured in hours, and keeps the execution log readable.
 var QUOTA_PAUSE_MS = 30 * 60 * 1000;
 
-// How many consecutive ticks must die the same transient way before it is worth
-// an email. Gmail refuses the occasional valid call for no reason and accepts
-// the same one a minute later; at once a minute, three is a fault that has
-// survived roughly three minutes of retrying, which no blip does. Anything real
-// is therefore reported within about three minutes of starting, and anything
-// momentary is reported not at all — it is in the execution log, where a
-// self-healing event belongs.
-var TRANSIENT_ALERT_AFTER = 3;
+// How long a failing relay may stay quiet when nothing is waiting to be sent.
+//
+// A failed tick with no marked draft in sight has harmed nothing — the relay
+// retries in a minute, and an email would give its reader nothing to do. What
+// makes that silence conditional rather than permanent is that a relay which
+// cannot talk to Gmail also cannot SEE a draft marked while it is broken: the
+// "nothing is waiting" that justifies the silence goes stale. These windows are
+// how long that claim is trusted. A refusal Gmail is known to retract gets
+// half an hour, since almost all of them are over within one tick; anything
+// unrecognised gets ten minutes, because it has no such track record.
+var BLIND_ALERT_MS = 30 * 60 * 1000;
+var UNKNOWN_BLIND_ALERT_MS = 10 * 60 * 1000;
 
-// A streak is only a streak while the failures are adjacent. Ticks are a minute
+// Failing ticks are one long spell while they are adjacent. Ticks are a minute
 // apart, so this is generous by an order of magnitude and exists purely so two
-// unrelated blips hours apart are not added together into a fault.
-var TRANSIENT_STREAK_WINDOW_MS = 15 * 60 * 1000;
+// unrelated blips hours apart are not summed into an outage.
+var FAULT_SPELL_GAP_MS = 15 * 60 * 1000;
 
 /** Trigger entry point. */
 function relayTick() {
@@ -141,10 +145,11 @@ function relayTick() {
     // outside Apps Script reads it, because one inside cannot report its death.
     putRelayHeartbeat(cfg, sent);
 
-    // A tick that got this far proves Gmail is answering, which ends any
-    // transient streak — the counter must measure *consecutive* failures, or a
-    // blip a day for three days would eventually be reported as an outage.
-    clearTransientFaults(state);
+    // A tick that got this far proves Gmail is answering, which ends the spell.
+    // It must measure *consecutive* failure, or one blip a day for a month
+    // would eventually read as a month-long outage. The journal of what those
+    // blips were is kept — that is a different bucket, and outlives this.
+    clearFailingSpell(state);
 
     pruneState(state);
     // saveState is a no-op when nothing changed, so an idle mailbox costs no
@@ -172,36 +177,33 @@ function relayTick() {
     }
     console.error(errorText(err, true));
 
-    // Gmail refuses the occasional valid call and accepts it again a minute
-    // later. Reported on sight, that is an email about nothing — which is worse
-    // than it sounds, because every alert that means nothing costs the next one
-    // its credibility. So a transient refusal is counted rather than reported,
-    // and only a streak of them is an email. Without state there is nothing to
-    // count with, and an unreported failure is far worse than a noisy one, so
-    // that case alerts as before.
-    var streak = state && isTransientGmailError(err)
-      ? noteTransientFault(state, 'gmail', new Date().getTime())
-      : 0;
+    // Whether this is worth an email depends on whether any mail is waiting on
+    // it — see shouldReportRunFailure. Either way it is recorded: the quiet
+    // path is quiet, not forgetful.
+    var failedAt = new Date().getTime();
+    var spell = state ? noteFailingTick(state, failedAt) : null;
+    var atRisk = state ? draftsAtRisk(state) : [];
+    var verdict = shouldReportRunFailure(err, atRisk.length, spell ? spell.ms : null);
 
-    if (streak && streak < TRANSIENT_ALERT_AFTER) {
+    if (state) recordFault(state, err, cfg, failedAt, verdict.report);
+
+    if (verdict.report) {
+      reportRunFailed(err, state, props, faultContext(state, atRisk, spell));
+    } else {
       console.log(
-        'transient Gmail refusal (' + streak + ' in a row, reporting at ' +
-        TRANSIENT_ALERT_AFTER + '): ' + errorText(err)
+        'run failed and no mail was waiting on it (' + spell.count + ' failing tick(s), ' +
+        Math.round(spell.ms / 60000) + ' min); recorded, not emailed: ' + errorText(err)
       );
-      // reportRunFailed's unconditional save is skipped on this path, so do it
-      // here: the streak has to survive the tick to be a streak at all, and the
-      // hourly-sweep marker set at the top of this run is in the same bundle.
+      // reportRunFailed saves unconditionally, and this path must do the same:
+      // the journal and the spell have to survive the tick that wrote them, and
+      // the hourly-sweep marker set at the top of this run is in the same
+      // bundle — losing it means every failing tick retries the expensive full
+      // scan, which is what exhausted the Gmail quota in the first place.
       try {
         saveState(props, state);
       } catch (e) {
-        console.error('could not record the transient streak: ' + errorText(e));
+        console.error('could not record the failure: ' + errorText(e));
       }
-    } else {
-      reportRunFailed(err, state, props, streak
-        ? 'Gmail refused this call on ' + streak + ' consecutive ticks (about ' +
-          streak + ' minutes). Single refusals are momentary and are not ' +
-          'reported; this one did not clear by itself.'
-        : '');
     }
 
     // A failing tick is not a silent one. The watchdog exists to catch true
@@ -219,26 +221,132 @@ function relayTick() {
 }
 
 /**
- * Record one more consecutive failure of `key`, and answer how many that makes.
+ * Record one more failing tick, and answer how long the current spell has run.
  *
- * A count rather than a timestamp because the question is "is it still there",
- * and the honest measure of that is how many attempts in a row have failed —
- * the relay retries on its own every minute, so a fault that survives three of
- * them is not a coincidence.
+ * Duration rather than a count, because the question the alert policy asks is
+ * "how long has the relay been unable to see the mailbox" — and that is what
+ * decides whether "nothing is waiting to be sent" is still a fact or merely the
+ * last thing we knew.
  */
-function noteTransientFault(state, key, now) {
-  var entry = state.faults[key];
-  var running = entry && entry.at && now - entry.at < TRANSIENT_STREAK_WINDOW_MS;
-  var count = running ? (entry.count || 0) + 1 : 1;
-  state.faults[key] = { at: now, count: count };
-  return count;
+function noteFailingTick(state, now) {
+  var spell = state.faults['run'];
+  var continuing = spell && spell.at && now - spell.at < FAULT_SPELL_GAP_MS;
+  var first = continuing ? spell.first || spell.at : now;
+  var count = continuing ? (spell.count || 0) + 1 : 1;
+  state.faults['run'] = { at: now, first: first, count: count };
+  return { first: first, count: count, ms: now - first };
 }
 
-/** A tick that worked ends every streak. */
-function clearTransientFaults(state) {
-  for (var key in state.faults) {
-    if (state.faults.hasOwnProperty(key)) delete state.faults[key];
+/** A tick that worked ends the spell. The journal of what happened stays. */
+function clearFailingSpell(state) {
+  delete state.faults['run'];
+}
+
+/**
+ * The drafts a failed run may have held up — the entire basis for saying
+ * something. This is what the operator's "is any of my mail stuck?" reduces to,
+ * answered from state alone: Gmail is the thing that just refused to talk, so
+ * asking it would fail the same way the tick did.
+ *
+ *   inflight — a send whose outcome is unknown. Loudest case there is.
+ *   seen+marked — a draft the scan has already classified as marked and that
+ *              has not since been consumed, sent, or reported failed. It was
+ *              going out this tick, and did not.
+ *
+ * `failed` drafts are deliberately absent: each already produced its own email
+ * and is waiting on a deliberate retry, not on this run.
+ *
+ * What this cannot see is a draft marked while the relay is broken — hence the
+ * blind windows above. The silence is only ever "nothing was waiting as of the
+ * last tick that could look".
+ */
+function draftsAtRisk(state) {
+  var ids = [];
+  var id;
+  for (id in state.inflight) {
+    if (state.inflight.hasOwnProperty(id)) ids.push(id);
   }
+  for (id in state.seen) {
+    if (!state.seen.hasOwnProperty(id)) continue;
+    var memo = state.seen[id];
+    if (!memo || !memo.marked) continue;
+    if (state.consumed[id] || state.inflight[id] || state.failed[id]) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Is this failure worth an email?
+ *
+ * Pure, and separated from the reporting it gates, because it is the policy
+ * itself: mail is sent when mail is at stake, and not otherwise.
+ *
+ *   no state    — nothing to reason from; report. An unreported failure is
+ *                 worse than a noisy one, so uncertainty always alerts.
+ *   quota       — item 18's day-long condition. It is reported on sight
+ *                 because "wait and see" is exactly wrong for an outage that
+ *                 lasts hours: every draft marked during it is affected.
+ *   at risk     — a send is unaccounted for, or a draft the relay had already
+ *                 picked up as marked is still sitting there.
+ *   blind too long — the relay has been unable to look for long enough that
+ *                 "nothing was waiting" is no longer a claim it can make.
+ */
+function shouldReportRunFailure(err, atRiskCount, spellMs) {
+  if (spellMs === null) return { report: true, why: 'no state to reason from' };
+  if (isServiceQuotaError(err)) return { report: true, why: 'a quota outage lasts hours' };
+  if (atRiskCount > 0) {
+    return { report: true, why: atRiskCount + ' draft(s) waiting on this run' };
+  }
+
+  var window = isTransientGmailError(err) ? BLIND_ALERT_MS : UNKNOWN_BLIND_ALERT_MS;
+  if (spellMs >= window) {
+    return { report: true, why: 'failing for ' + Math.round(spellMs / 60000) + ' minutes' };
+  }
+  return { report: false, why: 'nothing was waiting to be sent' };
+}
+
+/**
+ * What the operator needs to know beyond the error itself: what is waiting, how
+ * long this has been going on, and that quieter failures are being collected
+ * somewhere they can read them.
+ */
+function faultContext(state, atRisk, spell) {
+  var lines = [];
+
+  if (atRisk.length) {
+    lines.push(
+      'Waiting on this run: ' + atRisk.length + ' draft(s) the relay had already ' +
+      'picked up as marked (ids ' + atRisk.join(', ') + '). They are still in ' +
+      'your Drafts folder and go out by themselves once this clears.'
+    );
+  } else if (state) {
+    lines.push('Nothing was waiting to be sent when this failed.');
+  } else {
+    // The failure came before the state bundle could be read, so the relay
+    // cannot say what was pending. Claiming "nothing" here would be a guess
+    // dressed as a fact, in the one email whose job is to be trusted.
+    lines.push('The relay could not read its own state, so what was pending is unknown.');
+  }
+
+  if (spell && spell.count > 1) {
+    lines.push(
+      'This run has been failing for ' + Math.round(spell.ms / 60000) + ' minutes (' +
+      spell.count + ' ticks in a row).'
+    );
+  }
+
+  // Only worth saying when there is more in there than this one fault.
+  var journalled = state ? Object.keys(state.journal).length : 0;
+  if (journalled > 1) {
+    lines.push(
+      'Failures with no mail waiting on them are recorded rather than emailed; ' +
+      journalled + ' distinct one(s) are on file. Run showFaults() in the Apps ' +
+      'Script editor to see them, or read the RelayFault metric in CloudWatch.'
+    );
+  }
+
+  return lines.join('\n\n');
 }
 
 /**
@@ -519,10 +627,13 @@ if (typeof module !== 'undefined') {
     FULL_SWEEP_MS: FULL_SWEEP_MS,
     SCAN_LIMIT: SCAN_LIMIT,
     QUOTA_PAUSE_MS: QUOTA_PAUSE_MS,
-    TRANSIENT_ALERT_AFTER: TRANSIENT_ALERT_AFTER,
-    TRANSIENT_STREAK_WINDOW_MS: TRANSIENT_STREAK_WINDOW_MS,
+    BLIND_ALERT_MS: BLIND_ALERT_MS,
+    UNKNOWN_BLIND_ALERT_MS: UNKNOWN_BLIND_ALERT_MS,
+    FAULT_SPELL_GAP_MS: FAULT_SPELL_GAP_MS,
     relayTick: relayTick,
     selectMarkedDrafts: selectMarkedDrafts,
-    noteTransientFault: noteTransientFault,
+    noteFailingTick: noteFailingTick,
+    draftsAtRisk: draftsAtRisk,
+    shouldReportRunFailure: shouldReportRunFailure,
   });
 }

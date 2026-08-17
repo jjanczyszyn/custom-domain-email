@@ -23,9 +23,20 @@
  *   pauses   — until when a class of work is suspended. Today one key, 'gmail':
  *              set when a tick dies on the daily quota, so the ticks that
  *              follow skip Gmail entirely instead of failing the same way.
- *   faults   — how many consecutive ticks have now died the same transient
- *              way, so a momentary Gmail refusal is told apart from an outage
- *              by whether it is still there a minute later.
+ *   faults   — how long the current unbroken run of failing ticks has lasted,
+ *              so a momentary refusal is told apart from an outage by whether
+ *              it is still there minutes later. Cleared by any tick that works.
+ *
+ * And one is not a cache at all — it is the record kept INSTEAD of an email:
+ *
+ *   journal  — every run-level failure that was not worth waking anyone for,
+ *              by fingerprint: how often, when first and last seen, and
+ *              whether it was ever emailed. A failure with no mail waiting on
+ *              it harms nothing and is not reported, but it is not forgotten
+ *              either; showFaults() prints this, and the RelayFault metric
+ *              carries the same events to CloudWatch for reading from outside.
+ *              Deliberately NOT cleared by a good tick — the whole point is
+ *              that it outlives the episode it describes.
  *
  * All of them live under ONE property. Script Properties is the same surface that
  * holds your credentials and configuration, so a marker per draft would bury
@@ -34,7 +45,7 @@
 
 var PROP_STATE = '_relayState';
 var STATE_BUCKETS = [
-  'inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices', 'pauses', 'faults',
+  'inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices', 'pauses', 'faults', 'journal',
 ];
 
 /**

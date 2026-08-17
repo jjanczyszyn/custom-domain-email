@@ -463,16 +463,32 @@ starts skimming — which is precisely the state in which a real outage goes
 unread. The four-hour throttle bounds the *volume* of such mail; it does
 nothing about the first copy, which is the one that costs the credibility.
 
-**Mitigation:** a run-level failure Gmail is known to retract — "operation not
-allowed", the *short-term* rate limit, "service unavailable", and friends — is
-counted rather than reported. `faults.gmail` in the state bundle holds how many
-consecutive ticks have now died that way; three (about three minutes of
-retrying, at one tick a minute) is an email, and any tick that completes clears
-the count. A blip is therefore invisible outside the execution log, a genuine
-outage is reported within minutes and carries how long it has persisted, and
-anything the classifier does not recognise alerts on the first tick as before.
-Misjudging a fault as transient costs three minutes; misjudging a blip as a
-fault costs an email about nothing, so the patterns are deliberately broad.
+**Mitigation:** the alert now asks a different question. Not *did a run fail*,
+which the relay answers by retrying a minute later, but *is any mail waiting on
+it* — the only version of the question whose answer the reader can act on. A
+run-level failure is emailed when the relay is holding a send it cannot account
+for, or a draft it had already classified as marked; otherwise it is recorded
+and the tick moves on.
+
+Recorded, not swallowed. Both records are readable long after the episode:
+
+- `journal` in the state bundle — each distinct failure by fingerprint, with
+  its message, how often it has happened, when it was first and last seen, and
+  whether it was ever emailed. `showFaults()` prints it. Capped at ten faults,
+  because the same 9 KB property holds the never-duplicate guarantee and a
+  diagnostic must never be what evicts it.
+- `RelayFault` in CloudWatch, dimensioned by a slug of the message — the view
+  that needs nothing from Google to read, which is the only kind worth having
+  when Gmail is what is failing. Fingerprinted rather than raw: ids and counts
+  in a dimension value would mint a billed custom metric per occurrence.
+
+The silence is conditional, because a relay that cannot talk to Gmail also
+cannot *see* a draft marked while it is broken — "nothing is waiting" is a fact
+with a shelf life. So a spell of failing ticks is timed, and one still going
+after the blind window is reported regardless of what was known to be pending:
+half an hour for a refusal Gmail is known to retract, ten minutes for anything
+unrecognised. The daily quota keeps its own path and is reported on sight,
+since by nature it lasts hours and every draft marked during it is affected.
 
 The same change separates the short-term rate limit ("invoked too many times in
 a short time", which clears in seconds) from the daily quota of item 18, which
@@ -480,11 +496,14 @@ it reads almost identically to. Matched together, a few seconds of rate
 limiting armed a half-hour Gmail pause and sent a page of prose about a daily
 quota that had not run out.
 
-**The lesson worth keeping:** "did it fail?" is the wrong question to alert on
-for anything that retries on its own — the useful one is "is it still failing?"
-A system that retries every minute can answer that itself, for the price of a
-counter, and should, because every alert that turns out to need no action
-spends some of the attention the next one depends on.
+**The lesson worth keeping:** "did it fail?" is the wrong question to alert on.
+The useful one is "is anything the reader cares about worse off?" — here, is
+mail stuck. A system that retries on its own can answer that itself, and should,
+because every alert that turns out to need no action spends some of the
+attention the next one depends on. The corollary is what makes it safe: an
+alert you decide not to send still has to be *written down*, and the record has
+to outlive the episode and be readable from outside the system that failed.
+Suppression without a journal is not quiet, it is blind.
 
 ## Deliberately not solved
 

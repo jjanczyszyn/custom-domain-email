@@ -13,7 +13,9 @@ uses SES SMTP wired into Gmail's "Send mail as".
 ## What it costs
 
 Around **$1/month** at personal volume, almost all of which is the optional
-monitoring (4 CloudWatch alarms + 1 custom metric). Mail receiving, sending,
+monitoring (4 CloudWatch alarms + a handful of custom metrics — the heartbeat,
+plus one `RelayFault` series per *kind* of failure seen in the last week, which
+is normally none). Mail receiving, sending,
 Lambda, S3, and the dead-letter SQS queue sit inside free tiers. Route53 hosted
 zones are billed separately at $0.50/zone whether or not you run this.
 
@@ -149,6 +151,28 @@ to poke the pipeline for a fix:
   disabled, forwarder broken) and no in-pipeline email could ever fire, so the
   canary emails you directly. This is the one failure the DLQ notifier can't
   catch, because nothing reaches the forwarder to dead-letter.
+- **A failed relay run → an email only when mail is waiting on it.** The relay
+  retries every minute, so a tick that dies with nothing marked has already
+  fixed itself by the time you could read about it. Those are recorded instead:
+  in a `journal` inside the relay's state (`showFaults()` prints it — message,
+  count, first and last sighting, whether it was ever emailed) and as the
+  `RelayFault` CloudWatch metric, dimensioned by a slug of the message so it can
+  be read without opening the Apps Script editor:
+
+  ```bash
+  aws cloudwatch list-metrics --namespace EmailForwarder --metric-name RelayFault
+  aws cloudwatch get-metric-statistics --namespace EmailForwarder \
+    --metric-name RelayFault --period 3600 --statistics Sum --region us-east-1 \
+    --start-time "$(date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')" \
+    --end-time "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  ```
+
+  You are emailed when a send is unaccounted for, when a draft the relay had
+  already picked up as marked is still sitting there, when the Gmail daily quota
+  goes (an outage measured in hours), or when the relay has been failing long
+  enough that it can no longer see drafts you mark — half an hour for a refusal
+  Gmail is known to retract, ten minutes for anything else. See
+  `docs/relay-premortem.md` item 19.
 
 ### Filing the alerts in Gmail
 
