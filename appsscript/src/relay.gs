@@ -45,6 +45,20 @@ var SCAN_LIMIT = 50;
 // against an outage measured in hours, and keeps the execution log readable.
 var QUOTA_PAUSE_MS = 30 * 60 * 1000;
 
+// How many consecutive ticks must die the same transient way before it is worth
+// an email. Gmail refuses the occasional valid call for no reason and accepts
+// the same one a minute later; at once a minute, three is a fault that has
+// survived roughly three minutes of retrying, which no blip does. Anything real
+// is therefore reported within about three minutes of starting, and anything
+// momentary is reported not at all — it is in the execution log, where a
+// self-healing event belongs.
+var TRANSIENT_ALERT_AFTER = 3;
+
+// A streak is only a streak while the failures are adjacent. Ticks are a minute
+// apart, so this is generous by an order of magnitude and exists purely so two
+// unrelated blips hours apart are not added together into a fault.
+var TRANSIENT_STREAK_WINDOW_MS = 15 * 60 * 1000;
+
 /** Trigger entry point. */
 function relayTick() {
   // Premortem 6: overlapping runs would double-send. A second run exits rather
@@ -127,6 +141,11 @@ function relayTick() {
     // outside Apps Script reads it, because one inside cannot report its death.
     putRelayHeartbeat(cfg, sent);
 
+    // A tick that got this far proves Gmail is answering, which ends any
+    // transient streak — the counter must measure *consecutive* failures, or a
+    // blip a day for three days would eventually be reported as an outage.
+    clearTransientFaults(state);
+
     pruneState(state);
     // saveState is a no-op when nothing changed, so an idle mailbox costs no
     // remote write. It must still be called: a send that added and removed an
@@ -152,7 +171,38 @@ function relayTick() {
       state.pauses['gmail'] = { at: paused, until: paused + QUOTA_PAUSE_MS };
     }
     console.error(errorText(err, true));
-    reportRunFailed(err, state, props);
+
+    // Gmail refuses the occasional valid call and accepts it again a minute
+    // later. Reported on sight, that is an email about nothing — which is worse
+    // than it sounds, because every alert that means nothing costs the next one
+    // its credibility. So a transient refusal is counted rather than reported,
+    // and only a streak of them is an email. Without state there is nothing to
+    // count with, and an unreported failure is far worse than a noisy one, so
+    // that case alerts as before.
+    var streak = state && isTransientGmailError(err)
+      ? noteTransientFault(state, 'gmail', new Date().getTime())
+      : 0;
+
+    if (streak && streak < TRANSIENT_ALERT_AFTER) {
+      console.log(
+        'transient Gmail refusal (' + streak + ' in a row, reporting at ' +
+        TRANSIENT_ALERT_AFTER + '): ' + errorText(err)
+      );
+      // reportRunFailed's unconditional save is skipped on this path, so do it
+      // here: the streak has to survive the tick to be a streak at all, and the
+      // hourly-sweep marker set at the top of this run is in the same bundle.
+      try {
+        saveState(props, state);
+      } catch (e) {
+        console.error('could not record the transient streak: ' + errorText(e));
+      }
+    } else {
+      reportRunFailed(err, state, props, streak
+        ? 'Gmail refused this call on ' + streak + ' consecutive ticks (about ' +
+          streak + ' minutes). Single refusals are momentary and are not ' +
+          'reported; this one did not clear by itself.'
+        : '');
+    }
 
     // A failing tick is not a silent one. The watchdog exists to catch true
     // silence — a disabled trigger, revoked auth — where nothing runs and
@@ -165,6 +215,29 @@ function relayTick() {
     if (cfg) putRelayHeartbeat(cfg, 0);
   } finally {
     lock.releaseLock();
+  }
+}
+
+/**
+ * Record one more consecutive failure of `key`, and answer how many that makes.
+ *
+ * A count rather than a timestamp because the question is "is it still there",
+ * and the honest measure of that is how many attempts in a row have failed —
+ * the relay retries on its own every minute, so a fault that survives three of
+ * them is not a coincidence.
+ */
+function noteTransientFault(state, key, now) {
+  var entry = state.faults[key];
+  var running = entry && entry.at && now - entry.at < TRANSIENT_STREAK_WINDOW_MS;
+  var count = running ? (entry.count || 0) + 1 : 1;
+  state.faults[key] = { at: now, count: count };
+  return count;
+}
+
+/** A tick that worked ends every streak. */
+function clearTransientFaults(state) {
+  for (var key in state.faults) {
+    if (state.faults.hasOwnProperty(key)) delete state.faults[key];
   }
 }
 
@@ -446,7 +519,10 @@ if (typeof module !== 'undefined') {
     FULL_SWEEP_MS: FULL_SWEEP_MS,
     SCAN_LIMIT: SCAN_LIMIT,
     QUOTA_PAUSE_MS: QUOTA_PAUSE_MS,
+    TRANSIENT_ALERT_AFTER: TRANSIENT_ALERT_AFTER,
+    TRANSIENT_STREAK_WINDOW_MS: TRANSIENT_STREAK_WINDOW_MS,
     relayTick: relayTick,
     selectMarkedDrafts: selectMarkedDrafts,
+    noteTransientFault: noteTransientFault,
   });
 }

@@ -137,9 +137,51 @@ var QUOTA_ALERT_THROTTLE_MS = 24 * 60 * 60 * 1000;
  * relayTick's pause logic, so the two cannot disagree about what counts.
  * Matched on the message — "Service invoked too many times for one day" — so
  * the same cause thrown from a different call site is still recognised.
+ *
+ * The short-term rate limit ("too many times in a short time") shares most of
+ * that wording and none of its meaning: it clears in seconds, so treating it as
+ * the day-long condition would suspend Gmail work for half an hour and email a
+ * paragraph about a quota that is not the one that ran out. It is transient
+ * instead — see below.
  */
 function isServiceQuotaError(err) {
-  return /too many times/i.test(errorText(err));
+  var message = errorText(err);
+  return /too many times/i.test(message) && !/in a short time/i.test(message);
+}
+
+/**
+ * Is this Gmail declining for a moment, rather than something being wrong?
+ *
+ * Gmail's backend intermittently refuses a call that is perfectly valid — most
+ * often as "Gmail operation not allowed", which it also uses for the genuinely
+ * unreadable draft in premortem item 13. Thrown at a draft it means "not this
+ * draft"; thrown at `GmailApp.getUserLabelByName()`, as it was at 00:10 UTC on
+ * 17 Aug 2026, it means nothing at all — the next tick, a minute later, ran
+ * normally. The relay cannot tell the two apart from the message, and does not
+ * need to: what distinguishes a real outage is that it is still there a minute
+ * later, which is what the streak in relay.gs measures.
+ *
+ * Breadth is cheap here. Misreading a persistent fault as transient costs the
+ * few minutes the streak takes to fire; misreading a blip as a fault costs an
+ * email about nothing, which is the failure this exists to stop.
+ */
+var TRANSIENT_GMAIL_PATTERNS = [
+  /operation not allowed/i,
+  /too many times in a short time/i,
+  /service (unavailable|error|timed out)/i,
+  /temporarily unavailable/i,
+  /try again later/i,
+  /internal error/i,
+  /backend error/i,
+];
+
+function isTransientGmailError(err) {
+  if (isServiceQuotaError(err)) return false;
+  var message = errorText(err);
+  for (var i = 0; i < TRANSIENT_GMAIL_PATTERNS.length; i++) {
+    if (TRANSIENT_GMAIL_PATTERNS[i].test(message)) return true;
+  }
+  return false;
 }
 
 /**
@@ -150,7 +192,7 @@ function isServiceQuotaError(err) {
  * fault would have sent this mail on all 1,440 ticks, exhausting the separate
  * 100-recipients-a-day quota that genuine per-draft alerts depend on.
  */
-function reportRunFailed(err, state, props) {
+function reportRunFailed(err, state, props, note) {
   var message = errorText(err);
 
   // Fingerprint on the message rather than the stack, so the same cause
@@ -185,6 +227,7 @@ function reportRunFailed(err, state, props) {
     'Relay run failed',
     'The relay could not complete a run. No draft was sent by it.\n\n' +
       errorText(err, true) + '\n\n' +
+      (note ? note + '\n\n' : '') +
       (quota
         ? 'This is Gmail\'s daily quota for Apps Script calls (20,000 a day on a\n' +
           'consumer account), not an SES or AWS problem. It resets 24 hours after\n' +
@@ -314,6 +357,7 @@ if (typeof module !== 'undefined') {
     ALERT_THROTTLE_MS: ALERT_THROTTLE_MS,
     QUOTA_ALERT_THROTTLE_MS: QUOTA_ALERT_THROTTLE_MS,
     isServiceQuotaError: isServiceQuotaError,
+    isTransientGmailError: isTransientGmailError,
     RETRY_INSTRUCTIONS: RETRY_INSTRUCTIONS,
     tryAlert: tryAlert,
     claimAlertBudget: claimAlertBudget,
