@@ -23,14 +23,19 @@
  *   pauses   — until when a class of work is suspended. Today one key, 'gmail':
  *              set when a tick dies on the daily quota, so the ticks that
  *              follow skip Gmail entirely instead of failing the same way.
+ *   faults   — how many consecutive ticks have now died the same transient
+ *              way, so a momentary Gmail refusal is told apart from an outage
+ *              by whether it is still there a minute later.
  *
- * All six live under ONE property. Script Properties is the same surface that
+ * All of them live under ONE property. Script Properties is the same surface that
  * holds your credentials and configuration, so a marker per draft would bury
  * the handful of values you actually edit.
  */
 
 var PROP_STATE = '_relayState';
-var STATE_BUCKETS = ['inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices', 'pauses'];
+var STATE_BUCKETS = [
+  'inflight', 'consumed', 'failed', 'seen', 'sweeps', 'notices', 'pauses', 'faults',
+];
 
 /**
  * How long an entry survives.
@@ -53,7 +58,12 @@ var STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * worth avoiding, and re-reading is all a miss costs.
  */
 var CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-var STATE_TTL_OVERRIDES = { seen: CACHE_TTL_MS, notices: CACHE_TTL_MS, pauses: CACHE_TTL_MS };
+var STATE_TTL_OVERRIDES = {
+  seen: CACHE_TTL_MS,
+  notices: CACHE_TTL_MS,
+  pauses: CACHE_TTL_MS,
+  faults: CACHE_TTL_MS,
+};
 
 /**
  * What we last actually wrote, for the run in progress.

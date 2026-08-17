@@ -145,10 +145,13 @@ test("a recovered quota resumes normal scanning", () => {
   );
 });
 
+// A refusal Gmail is known to retract on its own takes the transient path
+// instead — see transient-fault.test.mjs — so this uses a failure that means
+// nothing but itself.
 test("a non-quota failure does not pause Gmail work, but still heartbeats", () => {
   globalThis.GmailApp.getDrafts = () => {
     gmailCalls++;
-    throw new Error("Gmail operation not allowed");
+    throw new Error("the mailbox is haunted");
   };
 
   gs.relayTick();

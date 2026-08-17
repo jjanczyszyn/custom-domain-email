@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A momentary Gmail refusal no longer sends an alert about nothing.** Gmail
+  threw `Gmail operation not allowed` at a routine label lookup, aborting one
+  tick; the next minute's tick ran normally, but the failure had already been
+  emailed. Run-level failures Gmail is known to retract are now counted instead
+  of reported: three consecutive ticks dying the same way is an email (about
+  three minutes, and it says so), any completed tick clears the count, and an
+  unrecognised failure still alerts on the first tick. The same classifier
+  separates the short-term rate limit — which clears in seconds — from the
+  daily quota it reads almost identically to, so a moment of rate limiting no
+  longer arms a half-hour Gmail pause. New `faults` bucket in the state bundle;
+  `transient-fault.test.mjs` covers it. Premortem item 19.
+
 - **Emoji replies no longer arrive looking empty.** Gmail's stored reply
   markup closes the HTML document before the quoted history; unrepaired,
   recipients' clients collapse the entire body behind a "trimmed content"
