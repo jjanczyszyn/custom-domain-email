@@ -157,13 +157,12 @@ function isServiceQuotaError(err) {
  * unreadable draft in premortem item 13. Thrown at a draft it means "not this
  * draft"; thrown at `GmailApp.getUserLabelByName()`, as it was at 00:10 UTC on
  * 17 Aug 2026, it means nothing at all — the next tick, a minute later, ran
- * normally. The relay cannot tell the two apart from the message, and does not
- * need to: what distinguishes a real outage is that it is still there a minute
- * later, which is what the streak in relay.gs measures.
+ * normally.
  *
- * Breadth is cheap here. Misreading a persistent fault as transient costs the
- * few minutes the streak takes to fire; misreading a blip as a fault costs an
- * email about nothing, which is the failure this exists to stop.
+ * The relay cannot tell the two apart from the message and does not try. All
+ * this decides is how long a failure is given to clear itself before the relay
+ * treats its own blindness as the problem (relay.gs, BLIND_ALERT_MS): a
+ * refusal Gmail is known to retract gets the longer rope.
  */
 var TRANSIENT_GMAIL_PATTERNS = [
   /operation not allowed/i,
@@ -182,6 +181,95 @@ function isTransientGmailError(err) {
     if (TRANSIENT_GMAIL_PATTERNS[i].test(message)) return true;
   }
   return false;
+}
+
+// ── The record kept instead of an email ──────────────────────────────────────
+//
+// A run-level failure with no mail waiting on it harms nothing: the relay
+// retries a minute later, and the operator has no action to take even if told.
+// Those are recorded rather than reported (see shouldReportRunFailure). The
+// record has to be worth reading later, which means two channels, because they
+// fail differently and answer different questions:
+//
+//   journal — in the state bundle: the message, how often, first and last seen,
+//             and whether it was ever emailed. Printed by showFaults().
+//   metric  — RelayFault in CloudWatch, dimensioned by a slug of the message,
+//             so the timeline is readable from outside Apps Script entirely —
+//             which is the only view available when Gmail itself is the thing
+//             failing, and the one an operator can query without opening the
+//             editor.
+
+/** At most this many distinct faults are remembered; the oldest is dropped. */
+var FAULT_JOURNAL_MAX = 10;
+
+/**
+ * A stable key for "the same failure again".
+ *
+ * Ids, counts and timestamps inside a message would otherwise make every
+ * occurrence look distinct — which would blow the journal's cap in ten ticks
+ * and, worse, mint a new CloudWatch metric per occurrence.
+ */
+function faultFingerprint(err) {
+  return errorText(err)
+    .replace(/[0-9a-f]{8,}/gi, '#')
+    .replace(/\d+/g, '#')
+    .slice(0, 120);
+}
+
+/** The same fingerprint as a CloudWatch dimension value. */
+function faultSlug(err) {
+  var slug = faultFingerprint(err)
+    .toLowerCase()
+    .replace(/[^a-z]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/, '');
+  return slug || 'unclassified';
+}
+
+/**
+ * Remember a run-level failure. Never throws: this is the quiet path, and a
+ * failure to record must not become a failure to run.
+ */
+function recordFault(state, err, cfg, now, emailed) {
+  try {
+    var key = faultFingerprint(err);
+    var entry = state.journal[key] || { first: now, count: 0, message: errorText(err) };
+    entry.at = now;
+    entry.count = (entry.count || 0) + 1;
+    if (emailed) entry.emailed = now;
+    state.journal[key] = entry;
+    capJournal(state);
+  } catch (e) {
+    console.error('could not journal the failure: ' + errorText(e));
+  }
+
+  // Without config there are no AWS credentials to report with — the failure is
+  // still in the journal and the execution log.
+  if (!cfg) return;
+  try {
+    putRelayFault(cfg, faultSlug(err));
+  } catch (e) {
+    console.warn('could not report the fault metric: ' + errorText(e));
+  }
+}
+
+/**
+ * Keep the journal inside the state bundle's ~9 KB, dropping the least recently
+ * seen fault first. The bundle's other buckets hold the never-duplicate
+ * guarantee; a diagnostic must never be what evicts them.
+ */
+function capJournal(state) {
+  var keys = [];
+  for (var key in state.journal) {
+    if (state.journal.hasOwnProperty(key)) keys.push(key);
+  }
+  if (keys.length <= FAULT_JOURNAL_MAX) return;
+
+  keys.sort(function (a, b) {
+    return (state.journal[a].at || 0) - (state.journal[b].at || 0);
+  });
+  for (var i = 0; i < keys.length - FAULT_JOURNAL_MAX; i++) delete state.journal[keys[i]];
 }
 
 /**
@@ -358,6 +446,10 @@ if (typeof module !== 'undefined') {
     QUOTA_ALERT_THROTTLE_MS: QUOTA_ALERT_THROTTLE_MS,
     isServiceQuotaError: isServiceQuotaError,
     isTransientGmailError: isTransientGmailError,
+    FAULT_JOURNAL_MAX: FAULT_JOURNAL_MAX,
+    faultFingerprint: faultFingerprint,
+    faultSlug: faultSlug,
+    recordFault: recordFault,
     RETRY_INSTRUCTIONS: RETRY_INSTRUCTIONS,
     tryAlert: tryAlert,
     claimAlertBudget: claimAlertBudget,

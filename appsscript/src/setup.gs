@@ -88,6 +88,54 @@ function showConfig() {
 }
 
 /**
+ * Everything that failed quietly.
+ *
+ * Run-level failures with no mail waiting on them are recorded rather than
+ * emailed, so this is where they surface. Reading it should be the first move
+ * when the relay "seems fine but feels off": an empty journal means the ticks
+ * have genuinely been clean, and a fault repeating a few times an hour is worth
+ * a look even though none of them was worth an interruption.
+ *
+ * The same events are in CloudWatch as the RelayFault metric, dimensioned by a
+ * slug of the message — which is the view to use when Gmail is what is failing,
+ * since it needs nothing from Google to read.
+ */
+function showFaults() {
+  var state = loadState(PropertiesService.getScriptProperties().getProperties());
+
+  var spell = state.faults['run'];
+  if (spell) {
+    console.log(
+      'Currently failing: ' + spell.count + ' tick(s) in a row since ' +
+      new Date(spell.first) + '.'
+    );
+  }
+
+  var keys = Object.keys(state.journal);
+  if (!keys.length) {
+    console.log('No run-level failures on file. Every tick that ran, worked.');
+    return;
+  }
+
+  keys.sort(function (a, b) {
+    return (state.journal[b].at || 0) - (state.journal[a].at || 0);
+  });
+
+  console.log(keys.length + ' distinct failure(s) on file, most recent first:');
+  for (var i = 0; i < keys.length; i++) {
+    var entry = state.journal[keys[i]];
+    console.log(
+      '\n- ' + entry.message +
+      '\n    seen ' + entry.count + ' time(s), first ' + new Date(entry.first) +
+      ', last ' + new Date(entry.at) +
+      '\n    ' + (entry.emailed
+        ? 'emailed ' + new Date(entry.emailed) + ' — mail was waiting on it'
+        : 'never emailed — nothing was waiting to be sent')
+    );
+  }
+}
+
+/**
  * Confirm the AWS credentials and signing work, without sending anything.
  *
  * Deliberately sends a request SES will reject on content rather than on
