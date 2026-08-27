@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A forwarded invitation can no longer be answered as the wrong address.**
+  Gmail draws its inline RSVP card for any `text/calendar` part and answers it
+  as the *signed-in account*, so accepting an invitation addressed to an
+  address on one of your domains RSVP'd as the Gmail account instead: the
+  organiser saw an unexpected guest accept, while the invited address stayed
+  "awaiting reply". The forwarder now demotes the invitation part to a plain
+  `invitation.ics` attachment (`application/ics`), so no card is offered to
+  answer from. Nothing is lost — the invitation is still attached and
+  importable, and an event organised in Google Calendar has already been
+  delivered to the invited address's own calendar, which is where the RSVP
+  belongs. Covered by unit tests and checked against five real invitations
+  taken from the S3 archive.
+
 - **The relay emails about a failed run only when mail is waiting on it.**
   Gmail threw `Gmail operation not allowed` at a routine label lookup, aborting
   one tick; the next minute's tick ran normally, but the failure had already

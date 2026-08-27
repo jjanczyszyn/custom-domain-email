@@ -136,7 +136,8 @@ export function rewrite(raw, fromAddress) {
   // reject the entire send and the mail would never reach the inbox.
   header = sanitizeAddressHeaders(header);
 
-  return header + body;
+  // Keep Gmail from answering an invitation as the wrong identity.
+  return defuseCalendarInvites(header + body);
 }
 
 // SES parses the To/Cc/Bcc headers out of the raw message when it sends and
@@ -233,4 +234,32 @@ export function wrapAsAttachment(raw, { fromAddress, destinations, boundary = "=
   ].filter((l) => l !== null);
 
   return Buffer.from(lines.join("\r\n"));
+}
+
+// Gmail draws an inline RSVP card ("Yes / Maybe / No") for any text/calendar
+// part and answers it as the *signed-in account*. A forwarded invitation is
+// addressed to an address on our domain, not to the Gmail account reading it,
+// so answering from the card RSVPs as the Gmail address — the organizer sees
+// the wrong person accept, and the invited address stays "awaiting reply".
+//
+// Demote the invitation part to a plain .ics attachment: the card disappears,
+// the invitation is still readable and importable, and the RSVP happens where
+// it belongs — on the calendar of the address that was actually invited (for a
+// Google-organised event Google has already delivered it there directly).
+const CALENDAR_PART = /^Content-Type:[ \t]*text\/calendar\b[^\r\n]*(?:\r?\n[ \t][^\r\n]*)*/gim;
+
+export function defuseCalendarInvites(raw) {
+  return raw.replace(CALENDAR_PART, (match, offset, str) => {
+    const rest = str.slice(offset + match.length);
+    const nl = rest.startsWith("\r\n") ? "\r\n" : "\n";
+    // The remaining headers of this MIME part, i.e. up to the blank line that
+    // starts its body — that is the only place a Content-Disposition of ours
+    // would be a duplicate.
+    const blockEnd = rest.search(/\r?\n\r?\n/);
+    const partHeaders = blockEnd === -1 ? rest : rest.slice(0, blockEnd);
+    const typed = 'Content-Type: application/ics; charset="UTF-8"; name="invitation.ics"';
+    return /^Content-Disposition:/im.test(partHeaders)
+      ? typed
+      : `${typed}${nl}Content-Disposition: attachment; filename="invitation.ics"`;
+  });
 }
