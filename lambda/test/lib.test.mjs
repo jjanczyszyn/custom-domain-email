@@ -10,6 +10,7 @@ import {
   sanitizeAddressHeaders,
   splitAddressList,
   wrapAsAttachment,
+  defuseCalendarInvites,
   SES_MAX_RAW_BYTES,
 } from "../src/lib.mjs";
 
@@ -229,4 +230,77 @@ test("oversizeNotice: bare From (no display name) still threads", () => {
   });
   assert.match(out, /^From: "jane@sender\.com via example\.com" <no-reply@example\.com>/m);
   assert.match(out, /^Reply-To: jane@sender\.com$/m);
+});
+
+// A Google invitation: an inline text/calendar part (the one that makes Gmail
+// draw the RSVP card) alongside the .ics attachment Google also sends.
+const INVITE = [
+  "From: Someone <someone@sender.com>",
+  "To: hello@example.com",
+  "Subject: Invitation: Coffee @ Thu Sep 3, 2026",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/alternative; boundary="b1"',
+  "",
+  "--b1",
+  'Content-Type: text/plain; charset="UTF-8"',
+  "",
+  "You have been invited.",
+  "",
+  "--b1",
+  'Content-Type: text/calendar; charset="UTF-8"; method=REQUEST',
+  "Content-Transfer-Encoding: 7bit",
+  "",
+  "BEGIN:VCALENDAR",
+  "METHOD:REQUEST",
+  "END:VCALENDAR",
+  "",
+  "--b1--",
+  "",
+].join("\r\n");
+
+test("defuseCalendarInvites: text/calendar becomes an .ics attachment", () => {
+  const out = defuseCalendarInvites(INVITE);
+  assert.ok(!/text\/calendar/i.test(out), "no text/calendar part is left to RSVP from");
+  assert.match(out, /^Content-Type: application\/ics; charset="UTF-8"; name="invitation\.ics"$/m);
+  assert.match(out, /^Content-Disposition: attachment; filename="invitation\.ics"$/m);
+  // The invitation itself is untouched, so it stays readable and importable.
+  assert.match(out, /BEGIN:VCALENDAR[\s\S]*END:VCALENDAR/);
+  assert.match(out, /^Content-Transfer-Encoding: 7bit$/m);
+});
+
+test("defuseCalendarInvites: keeps a part's own Content-Disposition (no duplicate)", () => {
+  const part = [
+    'Content-Type: text/calendar; method=REQUEST; name="meeting.ics"',
+    'Content-Disposition: attachment; filename="meeting.ics"',
+    "",
+    "BEGIN:VCALENDAR",
+  ].join("\r\n");
+  const out = defuseCalendarInvites(part);
+  assert.equal(out.match(/^Content-Disposition:/gim).length, 1);
+  assert.match(out, /filename="meeting\.ics"/);
+});
+
+test("defuseCalendarInvites: handles a folded Content-Type header", () => {
+  const part = [
+    "Content-Type: text/calendar;",
+    '\tcharset="UTF-8"; method=REQUEST',
+    "",
+    "BEGIN:VCALENDAR",
+  ].join("\r\n");
+  const out = defuseCalendarInvites(part);
+  assert.ok(!/text\/calendar/i.test(out));
+  assert.ok(!/method=REQUEST/.test(out), "the folded continuation is replaced too");
+});
+
+test("defuseCalendarInvites: leaves an invitation-free message alone", () => {
+  const plain = "From: a@b.com\r\nSubject: hi\r\n\r\nbody\r\n";
+  assert.equal(defuseCalendarInvites(plain), plain);
+});
+
+test("rewrite: a forwarded invitation carries no RSVP-able calendar part", () => {
+  const out = rewrite(INVITE, "no-reply@example.com");
+  assert.match(out, /^From: "Someone via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^Reply-To: Someone <someone@sender\.com>$/m);
+  assert.ok(!/text\/calendar/i.test(out));
+  assert.match(out, /^Content-Disposition: attachment; filename="invitation\.ics"$/m);
 });

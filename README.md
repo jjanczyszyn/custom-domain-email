@@ -83,6 +83,29 @@ give the address its own free Google profile:
 3. Enter the verification code Google sends (it forwards into your inbox).
 4. Set the profile photo. Recipients now see it next to your emails.
 
+## Answering calendar invitations as your domain
+
+Gmail's inline "Yes / Maybe / No" card answers an invitation as the **signed-in
+Google account**, no matter which address the invitation was actually sent to.
+Answering a forwarded invitation from that card therefore RSVPs as your Gmail
+address: the organiser sees an unexpected guest accept, and the invited address
+is left "awaiting reply". So the forwarder demotes the invitation to a plain
+`invitation.ics` attachment on the way through, and the card never appears.
+
+Answer as your domain in one of two ways instead:
+
+- **The "Reply for `hello@yourdomain`" link inside the invitation email.**
+  Google puts it there for exactly this case; it responds as the invited
+  address.
+- **From that address's own calendar.** Give `hello@yourdomain` a free Google
+  profile (above) and it gets a calendar of its own, which is where Google
+  delivers invitations addressed to it. Share that calendar with your Gmail
+  account ("Make changes to events"), and it sits in your normal calendar list —
+  RSVP on it and the response comes from the right address.
+
+An invitation from a sender that is not Google Calendar arrives only as the
+attachment: open it to import the event into that calendar.
+
 ## Sending after January 2027
 
 Gmail is removing "Send as" for third-party addresses in January 2027. That
