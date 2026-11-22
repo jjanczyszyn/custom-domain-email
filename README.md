@@ -5,7 +5,8 @@ a dollar a month. No Google Workspace, no paid forwarding service. It runs on yo
 own AWS account (SES + Lambda + S3 + Route53) and is managed with Terraform.
 
 Inbound mail to `*@yourdomain` is received by SES, stored in S3, and a Lambda
-re-sends it to your Gmail (the original sender is kept in `Reply-To`). Outbound
+re-sends it to your Gmail from an address unique to the sender (replies still
+go to the original sender). Outbound
 uses SES SMTP wired into Gmail's "Send mail as".
 
 ![How the email setup works](docs/email-setup-diagram.png)
@@ -105,6 +106,24 @@ Answer as your domain in one of two ways instead:
 
 An invitation from a sender that is not Google Calendar arrives only as the
 attachment: open it to import the event into that calendar.
+
+## Filtering forwarded mail
+
+SES can only send as a domain you own, so forwarded mail cannot keep its
+original From. Instead each sender gets an address of their own on your domain:
+
+| Original sender | Arrives from |
+|---|---|
+| `jane@sender.com` | `jane--sender.com@yourdomain` |
+
+- **Filter by sender:** use the real domain in the From field, e.g.
+  `sender.com`. For someone on a shared provider such as Gmail, use the name
+  and domain together: `jane--gmail.com`.
+- **Block a sender:** Gmail's Block works, and affects only that sender.
+- **Avoid "Report spam".** The message is signed by *your* domain, so reports
+  can count against the mail you send. Block, or filter to Trash, instead.
+- Replies go to the original sender. Senders whose address cannot be encoded
+  keep the shared `no-reply@` address.
 
 ## Sending after January 2027
 

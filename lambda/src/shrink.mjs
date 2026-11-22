@@ -12,6 +12,7 @@
 import { simpleParser } from "mailparser";
 import nodemailer from "nodemailer";
 import { Jimp } from "jimp";
+import { fromHeaderValue } from "./lib.mjs";
 
 const RECOMPRESSIBLE = /^image\/(jpe?g|png|tiff|bmp|webp)$/i;
 const DATA_URI = /data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)/gi;
@@ -24,15 +25,6 @@ const TIERS = [
   { maxDim: 1800, quality: 72 },
   { maxDim: 1280, quality: 65 },
 ];
-
-// Mirror lib.mjs rewrite(): re-send from our verified domain, original sender
-// preserved so replies still reach them.
-function rewriteFrom(originalFromText, fromAddress) {
-  const nameMatch = (originalFromText || "").match(/^(.*?)\s*<.+>$/);
-  const displayName = (nameMatch ? nameMatch[1] : originalFromText || "").replace(/"/g, "").trim();
-  const fromDomain = fromAddress.split("@")[1];
-  return displayName ? `"${displayName} via ${fromDomain}" <${fromAddress}>` : `<${fromAddress}>`;
-}
 
 async function recompress(buffer, { maxDim, quality }) {
   const img = await Jimp.read(buffer);
@@ -67,7 +59,7 @@ async function inlineImagesToCid(html, tier, fromDomain) {
 async function buildRaw(parsed, html, attachments, fromAddress, destinations) {
   const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: "windows" });
   const info = await transport.sendMail({
-    from: rewriteFrom(parsed.from?.text, fromAddress),
+    from: fromHeaderValue(parsed.from?.text || "", fromAddress),
     replyTo: parsed.from?.text || undefined,
     to: destinations.join(", "),
     subject: parsed.subject,

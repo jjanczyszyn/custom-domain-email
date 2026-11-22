@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   resolve,
   rewrite,
+  senderAddress,
   isProbe,
   isOversize,
   parseHeaders,
@@ -67,7 +68,7 @@ const RAW = [
 
 test("rewrite: From becomes our domain, original kept in Reply-To", () => {
   const out = rewrite(RAW, "no-reply@example.com");
-  assert.match(out, /^From: "Jane Doe via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "Jane Doe via example\.com" <jane--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: "Jane Doe" <jane@sender\.com>/m);
 });
 
@@ -87,7 +88,7 @@ test("rewrite: preserves Subject and body", () => {
 test("rewrite: bare From address (no display name) still rewrites", () => {
   const raw = "From: jane@sender.com\r\nSubject: x\r\n\r\nbody";
   const out = rewrite(raw, "no-reply@example.com");
-  assert.match(out, /^From: "jane@sender\.com via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "jane@sender\.com via example\.com" <jane--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: jane@sender\.com/m);
 });
 
@@ -147,7 +148,7 @@ test("rewrite: a message with a broken recipient header now sanitizes to a senda
   const out = rewrite(BROKEN_TO, "no-reply@example.net");
   assert.doesNotMatch(out, /undisclosed-recipients/);
   // Bare From (no display name) rewrites to our address; sender kept in Reply-To.
-  assert.match(out, /^From: <no-reply@example\.net>/m);
+  assert.match(out, /^From: <sender--gmail\.com@example\.net>/m);
   assert.match(out, /^Reply-To: <sender@gmail\.com>/m);
   assert.match(out, /^To: "'Ada Lovelace'" <hello@example\.net>\r?$/m);
 });
@@ -163,7 +164,7 @@ test("wrapAsAttachment: builds a clean envelope with the original as message/rfc
     fromAddress: "no-reply@example.net",
     destinations: ["owner@gmail.com"],
   }).toString("utf-8");
-  assert.match(out, /^From: "Jane via example\.net" <no-reply@example\.net>/m);
+  assert.match(out, /^From: "Jane via example\.net" <jane--sender\.com@example\.net>/m);
   assert.match(out, /^Reply-To: "Jane" <jane@sender\.com>/m);
   assert.match(out, /^To: owner@gmail\.com$/m);
   assert.match(out, /^Subject: Hi$/m);
@@ -211,7 +212,7 @@ test("oversizeNotice: threads correctly and points at the S3 original", () => {
     key: "archive/abc123",
     sizeBytes: 12118707,
   });
-  assert.match(out, /^From: "Jane Doe via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "Jane Doe via example\.com" <jane--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: "Jane Doe" <jane@sender\.com>/m);
   assert.match(out, /^Subject: \[Large email — not auto-forwarded\] Big photos/m);
   assert.match(out, /11\.6 MB/); // 12118707 bytes
@@ -228,7 +229,7 @@ test("oversizeNotice: bare From (no display name) still threads", () => {
     key: "k",
     sizeBytes: 11 * 1024 * 1024,
   });
-  assert.match(out, /^From: "jane@sender\.com via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "jane@sender\.com via example\.com" <jane--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: jane@sender\.com$/m);
 });
 
@@ -299,8 +300,46 @@ test("defuseCalendarInvites: leaves an invitation-free message alone", () => {
 
 test("rewrite: a forwarded invitation carries no RSVP-able calendar part", () => {
   const out = rewrite(INVITE, "no-reply@example.com");
-  assert.match(out, /^From: "Someone via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "Someone via example\.com" <someone--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: Someone <someone@sender\.com>$/m);
   assert.ok(!/text\/calendar/i.test(out));
   assert.match(out, /^Content-Disposition: attachment; filename="invitation\.ics"$/m);
+});
+
+// Each sender gets an address of its own, so Gmail can block or filter one
+// sender without touching the rest of the forwarded mail.
+const SHARED = "no-reply@example.com";
+
+test("senderAddress: different senders get different addresses, the same sender a stable one", () => {
+  const a = senderAddress('"Jane" <jane@sender.com>', SHARED);
+  assert.equal(a, "jane--sender.com@example.com");
+  assert.equal(senderAddress("Jane D. <JANE@Sender.com>", SHARED), a);
+  assert.notEqual(senderAddress("bob@sender.com", SHARED), a);
+  assert.notEqual(senderAddress("jane@other.com", SHARED), a);
+});
+
+test("senderAddress: characters that would need quoting are replaced", () => {
+  assert.equal(
+    senderAddress("<bounce+acct_1=x@mail.sender.com>", SHARED),
+    "bounce-acct_1-x--mail.sender.com@example.com"
+  );
+  assert.equal(senderAddress("<.a..b.@sender.com>", SHARED), "a.b--sender.com@example.com");
+});
+
+test("senderAddress: the local part never exceeds 64 characters and keeps the whole domain", () => {
+  const out = senderAddress(`<${"x".repeat(60)}@news.sender.com>`, SHARED);
+  const local = out.slice(0, out.lastIndexOf("@"));
+  assert.ok(local.length <= 64);
+  assert.match(local, /--news\.sender\.com$/);
+});
+
+test("senderAddress: falls back to the shared address when it cannot encode the sender", () => {
+  assert.equal(senderAddress("", SHARED), SHARED);
+  assert.equal(senderAddress("undisclosed", SHARED), SHARED);
+  assert.equal(senderAddress("<jane@localhost>", SHARED), SHARED);
+  assert.equal(senderAddress(`<j@${"d".repeat(70)}.com>`, SHARED), SHARED);
+});
+
+test("senderAddress: mail from our own domain keeps the shared address", () => {
+  assert.equal(senderAddress("Me <hello@example.com>", SHARED), SHARED);
 });

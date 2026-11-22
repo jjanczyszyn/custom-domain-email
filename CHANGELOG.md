@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- **Every sender now has an address of their own, so Gmail can filter and block
+  them.** All forwarded mail used to arrive from one shared `no-reply@` address:
+  Gmail could not filter by sender, and blocking one sender would have blocked
+  everyone. Mail from `jane@sender.com` now arrives from
+  `jane--sender.com@yourdomain`, so `from:sender.com` works in search and
+  filters, and Block affects only that sender. Replies are unaffected, and
+  bounces still return to the shared address. Filters that match the old
+  `no-reply@` address need updating (README, "Filtering forwarded mail"). (#12)
+
 ### Fixed
 
 - **A forwarded invitation can no longer be answered as the wrong address.**
