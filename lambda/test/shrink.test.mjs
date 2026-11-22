@@ -41,7 +41,7 @@ test("shrinkToFit: inline image becomes a cid: part, never a data: URI", async (
   });
   assert.ok(res, "expected a rebuilt message");
   const out = res.message.toString("utf-8");
-  assert.match(out, /^From: "Jane Doe via example\.com" <no-reply@example\.com>/m);
+  assert.match(out, /^From: "Jane Doe via example\.com" <jane--sender\.com@example\.com>/m);
   assert.match(out, /^Reply-To: .*jane@sender\.com/m);
   assert.match(out, /^Subject: Trip photos/m);
   assert.match(out, /cid:inline-0@example\.com/); // html now references a cid

@@ -11,7 +11,7 @@ variable "project" {
 }
 
 variable "from_localpart" {
-  description = "Local part of the address forwarded mail is sent FROM (e.g. no-reply@<domain>). Original sender is kept in Reply-To."
+  description = "Local part of the shared address: envelope sender of forwarded mail (bounces), and its From when a per-sender address cannot be built."
   type        = string
   default     = "no-reply"
 }

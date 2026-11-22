@@ -47,16 +47,43 @@ export function parseHeaders(raw, names) {
   return out;
 }
 
-// Build the rewritten `From` value: our verified address, carrying the
-// original sender's display name ("Jane via ourdomain") so the inbox still
-// shows who really wrote. Shared by every path that re-sends from our domain.
+// Give each original sender its own address on our domain:
+//   jane@sender.com -> jane--sender.com@ourdomain
+// With one shared From for every forwarded message Gmail cannot block or filter
+// by sender (its from: search only sees ours, and blocking one sender would
+// block all forwarded mail). "--" rather than "=" or "+" because Gmail's search
+// splits on it, so from:sender.com matches. The address is only a label:
+// Reply-To still carries the real reply address. Anything that cannot be
+// encoded safely keeps the shared address.
+const MAX_LOCALPART = 64;
+
+export function senderAddress(originalFrom, fromAddress) {
+  const fallbackDomain = fromAddress.split("@")[1];
+  const m = addrSpecOf(originalFrom || "").toLowerCase().match(/^([^\s@]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/);
+  if (!m) return fromAddress;
+  // Our own domains' mail (e.g. copies of mail we sent) stays recognisable.
+  const domain = m[2];
+  if (domain === fallbackDomain.toLowerCase()) return fromAddress;
+  // dot-atom only: no quoting needed, no leading/trailing/double dots.
+  const clean = (x) => x.replace(/[^a-z0-9._-]+/g, "-").replace(/\.{2,}/g, ".").replace(/^[.-]+|[.-]+$/g, "");
+  // Keep the whole domain (that is what filters match on); trim the mailbox.
+  const room = MAX_LOCALPART - domain.length - 2;
+  if (room < 0) return fromAddress;
+  const local = clean(clean(m[1]).slice(0, room));
+  return `${local ? `${local}--` : ""}${domain}@${fallbackDomain}`;
+}
+
+// Build the rewritten `From` value: an address on our domain unique to the
+// sender, with the original sender's display name ("Jane via ourdomain") so
+// the inbox still shows who really wrote. Shared by every re-send path.
 export function fromHeaderValue(originalFrom, fromAddress) {
   const nameMatch = originalFrom.match(/^(.*?)\s*<.+>$/);
   const displayName = (nameMatch ? nameMatch[1] : originalFrom).replace(/"/g, "").trim();
+  const address = senderAddress(originalFrom, fromAddress);
   const fromDomain = fromAddress.split("@")[1];
   return displayName
-    ? `"${displayName} via ${fromDomain}" <${fromAddress}>`
-    : `<${fromAddress}>`;
+    ? `"${displayName} via ${fromDomain}" <${address}>`
+    : `<${address}>`;
 }
 
 // Build a small text/plain notice for a message too large to forward whole.
